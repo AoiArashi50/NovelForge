@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 220 13% 9%;
+    --foreground: 43 70% 97%;
+    --card: 220 13% 12%;
+    --card-foreground: 43 70% 97%;
+    --popover: 220 13% 12%;
+    --popover-foreground: 43 70% 97%;
+    --primary: 43 96% 56%;
+    --primary-foreground: 220 13% 9%;
+    --secondary: 220 13% 18%;
+    --secondary-foreground: 43 70% 97%;
+    --muted: 220 13% 18%;
+    --muted-foreground: 220 9% 46%;
+    --accent: 220 13% 18%;
+    --accent-foreground: 43 70% 97%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 43 70% 97%;
+    --border: 220 13% 20%;
+    --input: 220 13% 20%;
+    --ring: 43 96% 56%;
+    --radius: 0.5rem;
+
+    --cream: #FDFBF5;
+    --amber: #F59E0B;
+    --dark-base: #111827;
+    --dark-card: #1F2937;
+    --dark-border: rgba(255, 255, 255, 0.1);
+    --glass-surface: rgba(255, 255, 255, 0.03);
+  }
+
+  body {
+    @apply bg-[#111827] text-[#FDFBF5] antialiased;
+    font-family: 'Noto Serif SC', 'Georgia', serif;
+  }
+
+  * {
+    @apply border-[rgba(255,255,255,0.1)];
+  }
+}
+
+/* 自定义滑块样式 */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: 999px;
+  outline: none;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #F59E0B;
+  cursor: pointer;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+  border: 2px solid #F59E0B;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+input[type="range"]::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.6);
+}
+
+input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #F59E0B;
+  cursor: pointer;
+  border: 2px solid #F59E0B;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.4);
+}
+
+/* 扫光文字动画 */
+@keyframes shimmerSweep {
+  0% {
+    background-position: -200% center;
+  }
+  100% {
+    background-position: 200% center;
+  }
+}
+
+.animate-shimmerSweep {
+  animation: shimmerSweep 3s ease-in-out infinite;
+}

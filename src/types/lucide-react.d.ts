@@ -1,0 +1,68 @@
+declare module "lucide-react" {
+  import type { FC, SVGProps } from "react"
+  export interface LucideProps extends SVGProps<SVGSVGElement> {
+    size?: number | string
+    absoluteStrokeWidth?: boolean
+  }
+  export const ChevronLeft: FC<LucideProps>
+  export const ChevronRight: FC<LucideProps>
+  export const List: FC<LucideProps>
+  export const Languages: FC<LucideProps>
+  export const Type: FC<LucideProps>
+  export const Moon: FC<LucideProps>
+  export const Sun: FC<LucideProps>
+  export const BookOpen: FC<LucideProps>
+  export const Trash2: FC<LucideProps>
+  export const Plus: FC<LucideProps>
+  export const Users: FC<LucideProps>
+  export const Globe: FC<LucideProps>
+  export const BookMarked: FC<LucideProps>
+  export const Database: FC<LucideProps>
+  export const Upload: FC<LucideProps>
+  export const FileText: FC<LucideProps>
+  export const Lightbulb: FC<LucideProps>
+  export const Tag: FC<LucideProps>
+  export const Sparkles: FC<LucideProps>
+  export const AlertCircle: FC<LucideProps>
+  export const CheckCircle: FC<LucideProps>
+  export const Loader2: FC<LucideProps>
+  export const PenTool: FC<LucideProps>
+  export const Settings: FC<LucideProps>
+  export const Save: FC<LucideProps>
+  export const Download: FC<LucideProps>
+  export const RotateCcw: FC<LucideProps>
+  export const Lock: FC<LucideProps>
+  export const Unlock: FC<LucideProps>
+  export const Wand2: FC<LucideProps>
+  export const Thermometer: FC<LucideProps>
+  export const Palette: FC<LucideProps>
+  export const Heart: FC<LucideProps>
+  export const Music: FC<LucideProps>
+  export const Shield: FC<LucideProps>
+  export const BookText: FC<LucideProps>
+  export const Home: FC<LucideProps>
+  export const Library: FC<LucideProps>
+  export const ArrowLeft: FC<LucideProps>
+  export const Search: FC<LucideProps>
+  export const Edit: FC<LucideProps>
+  export const MoreVertical: FC<LucideProps>
+  export const Play: FC<LucideProps>
+  export const Bookmark: FC<LucideProps>
+  export const BookmarkPlus: FC<LucideProps>
+  export const ChevronDown: FC<LucideProps>
+  export const Clock: FC<LucideProps>
+  export const Eye: FC<LucideProps>
+  export const Calendar: FC<LucideProps>
+  export const X: FC<LucideProps>
+  export const RotateCw: FC<LucideProps>
+  export const Zap: FC<LucideProps>
+  export const Highlighter: FC<LucideProps>
+  export const PenLine: FC<LucideProps>
+  export const MessageSquare: FC<LucideProps>
+  export const Pencil: FC<LucideProps>
+  export const Eye: FC<LucideProps>
+  export const ArrowLeftRight: FC<LucideProps>
+  export const CheckSquare: FC<LucideProps>
+  export const Square: FC<LucideProps>
+  export const Theater: FC<LucideProps>
+}
