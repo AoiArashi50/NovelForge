@@ -8,7 +8,7 @@
 import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
-import { chapters, novels, translationMemory } from "@db/schema"
+import { chapters, novels, translationMemory, characterCards, worldBibles, seriesCanon } from "@db/schema"
 import { eq, asc, sql } from "drizzle-orm"
 import { streamChat, getEmbedding } from "../services/deepseek"
 
@@ -18,19 +18,24 @@ import { streamChat, getEmbedding } from "../services/deepseek"
 async function fuzzyTranslationMemoryMatch(
   segment: string,
   novelId: number,
-  topK: number = 3
+  seriesId: number | null,
+  topK: number = 3,
+  precomputedEmbedding?: number[]
 ): Promise<Array<{ sourceText: string; translatedText: string; similarity: number }>> {
   const db = getDb()
 
   try {
-    const queryEmbedding = await getEmbedding(segment)
+    const queryEmbedding = precomputedEmbedding || await getEmbedding(segment)
     const embeddingJson = JSON.stringify(queryEmbedding)
 
     const results = await db.execute(sql`
       SELECT source_text, translated_text, 1 - (embedding <=> ${embeddingJson}) as similarity
       FROM translation_memory
-      WHERE (${novelId}::int IS NULL OR novel_id = ${novelId})
-        AND embedding IS NOT NULL
+      WHERE embedding IS NOT NULL
+        AND (
+          (${seriesId}::int IS NOT NULL AND series_id = ${seriesId})
+          OR novel_id = ${novelId}
+        )
       ORDER BY embedding <=> ${embeddingJson}
       LIMIT ${topK}
     `)
@@ -45,7 +50,11 @@ async function fuzzyTranslationMemoryMatch(
     const memories = await db
       .select()
       .from(translationMemory)
-      .where(eq(translationMemory.novelId, novelId))
+      .where(
+        seriesId
+          ? sql`series_id = ${seriesId} OR novel_id = ${novelId}`
+          : eq(translationMemory.novelId, novelId)
+      )
       .limit(topK)
 
     return memories.map(m => ({
@@ -62,20 +71,25 @@ async function fuzzyTranslationMemoryMatch(
 async function hybridSearchForTranslation(
   query: string,
   novelId: number,
-  limit: number = 3
+  seriesId: number | null,
+  limit: number = 3,
+  precomputedEmbedding?: number[]
 ): Promise<Array<{ content: string; sourceType: string; score: number }>> {
   const db = getDb()
 
   // 向量检索
   let vectorResults: Record<string, unknown>[] = []
   try {
-    const embedding = await getEmbedding(query)
+    const embedding = precomputedEmbedding || await getEmbedding(query)
     const embeddingJson = JSON.stringify(embedding)
 
     const vec = await db.execute(sql`
       SELECT content, source_type, 1 - (embedding <=> ${embeddingJson}) as score
       FROM vector_chunks
-      WHERE novel_id = ${novelId}
+      WHERE (
+        (${seriesId}::int IS NOT NULL AND series_id = ${seriesId})
+        OR novel_id = ${novelId}
+      )
       ORDER BY embedding <=> ${embeddingJson}
       LIMIT ${limit * 2}
     `)
@@ -87,7 +101,10 @@ async function hybridSearchForTranslation(
     SELECT content, source_type,
       ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', ${query})) as score
     FROM vector_chunks
-    WHERE novel_id = ${novelId}
+    WHERE (
+      (${seriesId}::int IS NOT NULL AND series_id = ${seriesId})
+      OR novel_id = ${novelId}
+    )
       AND to_tsvector('simple', content) @@ plainto_tsquery('simple', ${query})
     ORDER BY score DESC
     LIMIT ${limit * 2}
@@ -121,12 +138,111 @@ async function hybridSearchForTranslation(
     .slice(0, limit)
 }
 
+// 构建 Lore 章节（世界观 + 角色 + 术语表）
+async function buildLoreSection(seriesId: number): Promise<string> {
+  const db = getDb()
+  const parts: string[] = []
+
+  // 世界观
+  const [worldBible] = await db
+    .select()
+    .from(worldBibles)
+    .where(eq(worldBibles.seriesId, seriesId))
+
+  if (worldBible) {
+    parts.push("【世界观设定】")
+    const aspects = (worldBible.aspects || []) as Array<{ name: string; content: string }>
+    if (aspects.length > 0) {
+      for (const aspect of aspects) {
+        parts.push(`「${aspect.name}」${aspect.content}`)
+      }
+    }
+    if (worldBible.magicSystem) parts.push(`力量体系: ${worldBible.magicSystem}`)
+    if (worldBible.geography) parts.push(`地理政治: ${worldBible.geography}`)
+    if (worldBible.technologyLevel) parts.push(`技术水平: ${worldBible.technologyLevel}`)
+  }
+
+  // 角色设定
+  const chars = await db
+    .select()
+    .from(characterCards)
+    .where(eq(characterCards.seriesId, seriesId))
+
+  if (chars.length > 0) {
+    if (parts.length > 0) parts.push("")
+    parts.push("【角色设定】")
+    for (const char of chars.slice(0, 10)) {
+      const traits = (char.personalityTraits as string[] || []).join("、") || "无性格标签"
+      parts.push(`- ${char.name}: ${traits}${char.speechPatterns ? ` | 语言风格: ${char.speechPatterns}` : ""}`)
+    }
+  }
+
+  // 正史事件（不可变）
+  const canonEvents = await db
+    .select()
+    .from(seriesCanon)
+    .where(eq(seriesCanon.seriesId, seriesId))
+    .orderBy(asc(seriesCanon.eventOrder))
+
+  const immutableEvents = canonEvents.filter(e => e.isImmutable)
+  if (immutableEvents.length > 0) {
+    if (parts.length > 0) parts.push("")
+    parts.push("【不可变正史事件】")
+    for (const event of immutableEvents.slice(0, 5)) {
+      parts.push(`- ${event.description}`)
+    }
+  }
+
+  // 术语表（从 translation_memory 提取）
+  try {
+    const tmTerms = await db.execute(sql`
+      SELECT source_text, translated_text, frequency
+      FROM translation_memory
+      WHERE series_id = ${seriesId}
+      ORDER BY frequency DESC
+      LIMIT 15
+    `)
+    const terms = Array.isArray(tmTerms) ? tmTerms : []
+    if (terms.length > 0) {
+      if (parts.length > 0) parts.push("")
+      parts.push("【术语表】以下术语必须按此表翻译，严禁自创译名：")
+      for (const t of terms) {
+        parts.push(`- ${String(t.source_text)} → ${String(t.translated_text)}`)
+      }
+    }
+  } catch { /* 术语表可选 */ }
+
+  return parts.join("\n")
+}
+
+// 翻译用 chunk 分割：800 字符/块，200 字符重叠，优先段落边界
+function splitTranslationSegments(text: string): string[] {
+  const maxLen = 800
+  const overlap = 200
+
+  const paragraphs = text.split("\n").filter(p => p.trim().length > 0)
+  const segments: string[] = []
+  let current = ""
+
+  for (const para of paragraphs) {
+    if (current.length + para.length > maxLen && current.length > 0) {
+      segments.push(current)
+      current = current.slice(-overlap) + "\n" + para
+    } else {
+      current += (current ? "\n" : "") + para
+    }
+  }
+  if (current) segments.push(current)
+  return segments
+}
+
 // 翻译提示词模板
 function buildTranslationPrompt(
   sourceText: string,
   style: string,
   fuzzyMatches: Array<{ sourceText: string; translatedText: string; similarity: number }>,
   ragReference: Array<{ content: string; score: number }>,
+  loreSection: string,
   userPrompt?: string
 ): string {
   const fewShotStr = fuzzyMatches.length > 0
@@ -137,8 +253,10 @@ function buildTranslationPrompt(
     : ""
 
   const ragStr = ragReference.length > 0
-    ? "\n【上下文参考】\n" + ragReference.map(r => r.content).join("\n---\n").slice(0, 1500)
+    ? "\n【上下文参考】\n" + ragReference.map(r => r.content).join("\n---\n").slice(0, 1200)
     : ""
+
+  const loreStr = loreSection ? "\n【世界观与角色设定】\n" + loreSection + "\n" : ""
 
   const styleInstruction: Record<string, string> = {
     literal: "直译为主，保留原文结构和语序",
@@ -150,25 +268,13 @@ function buildTranslationPrompt(
     ? `\n【用户自定义要求】(请优先遵守以下要求)\n${userPrompt}\n`
     : ""
 
-  return `请将以下外文小说段落翻译成中文。\n\n要求：${styleInstruction[style] || styleInstruction.fluent}${fewShotStr}${ragStr}${userStr}\n\n原文：\n${sourceText}\n\n译文：`
-}
+  return `请将以下外文小说段落翻译成中文。
 
-// 文本分段函数（翻译用，按最大长度）
-function splitText(text: string, maxLength: number): string[] {
-  const segments: string[] = []
-  let current = ""
+要求：${styleInstruction[style] || styleInstruction.fluent}${loreStr}${fewShotStr}${ragStr}${userStr}
+原文：
+${sourceText}
 
-  for (const paragraph of text.split("\n")) {
-    if (current.length + paragraph.length > maxLength && current.length > 0) {
-      segments.push(current)
-      current = paragraph
-    } else {
-      current += (current ? "\n" : "") + paragraph
-    }
-  }
-
-  if (current) segments.push(current)
-  return segments
+译文：`
 }
 
 // 将文本分割为段落数组
@@ -188,6 +294,14 @@ export const translateRouter = createRouter({
     }))
     .mutation(async ({ input }) => {
       const db = getDb()
+
+      // 获取小说信息（用于 seriesId）
+      const [novel] = await db
+        .select()
+        .from(novels)
+        .where(eq(novels.id, input.novelId))
+
+      const seriesId = novel?.seriesId || null
 
       const chapterList = await db
         .select()
@@ -216,6 +330,9 @@ export const translateRouter = createRouter({
         }
       }
 
+      // 预构建 lore 章节（只查一次）
+      const loreSection = seriesId ? await buildLoreSection(seriesId) : ""
+
       for (const chapter of chapterList) {
         if (!chapter.contentOriginal) {
           completed++
@@ -223,12 +340,25 @@ export const translateRouter = createRouter({
           continue
         }
 
-        const segments = splitText(chapter.contentOriginal, 2000)
+        // 使用 800 字符 chunk + 200 字符重叠
+        const segments = splitTranslationSegments(chapter.contentOriginal)
         let translatedContent = ""
 
+        // 预计算本章 embedding（每章 1 次，避免 N+1）
+        let chapterEmbedding: number[] | undefined
+        try {
+          chapterEmbedding = await getEmbedding(chapter.contentOriginal.slice(0, 500))
+        } catch {
+          // embedding 失败不影响主流程
+        }
+
         for (const segment of segments) {
-          const fuzzyMatches = await fuzzyTranslationMemoryMatch(segment, input.novelId, 3)
-          const ragRef = await hybridSearchForTranslation(segment.slice(0, 200), input.novelId, 2)
+          const fuzzyMatches = await fuzzyTranslationMemoryMatch(
+            segment, input.novelId, seriesId, 3, chapterEmbedding
+          )
+          const ragRef = await hybridSearchForTranslation(
+            segment.slice(0, 200), input.novelId, seriesId, 2, chapterEmbedding
+          )
 
           // 记录 RAG 调用
           for (const m of fuzzyMatches) {
@@ -238,7 +368,9 @@ export const translateRouter = createRouter({
             addRagCall({ type: r.sourceType === "parallel_corpus" ? "full_text" : "vector_search", content: r.content, score: r.score, sourceType: r.sourceType })
           }
 
-          const prompt = buildTranslationPrompt(segment, input.style, fuzzyMatches, ragRef, input.userPrompt)
+          const prompt = buildTranslationPrompt(
+            segment, input.style, fuzzyMatches, ragRef, loreSection, input.userPrompt
+          )
 
           const stream = streamChat({
             messages: [{ role: "user", content: prompt }],
@@ -261,11 +393,6 @@ export const translateRouter = createRouter({
       }
 
       // 保存翻译风格设置到小说元数据
-      const [novel] = await db
-        .select()
-        .from(novels)
-        .where(eq(novels.id, input.novelId))
-
       const updatedMetadata = {
         ...(novel?.metadata as Record<string, unknown> || {}),
         lastTranslateStyle: input.style,
@@ -278,6 +405,100 @@ export const translateRouter = createRouter({
         .where(eq(novels.id, input.novelId))
 
       return { progress: 100, completed: true, total, results, ragCalls }
+    }),
+
+  // 单章翻译（用于前端逐章翻译 + 进度展示）
+  chapter: publicQuery
+    .input(z.object({
+      novelId: z.number(),
+      chapterId: z.number(),
+      style: z.enum(["literal", "fluent", "literary"]).default("fluent"),
+      userPrompt: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb()
+
+      const [novel] = await db
+        .select()
+        .from(novels)
+        .where(eq(novels.id, input.novelId))
+
+      const seriesId = novel?.seriesId || null
+
+      const [chapter] = await db
+        .select()
+        .from(chapters)
+        .where(eq(chapters.id, input.chapterId))
+
+      if (!chapter || !chapter.contentOriginal) {
+        throw new Error("章节不存在或内容为空")
+      }
+
+      // 预构建 lore
+      const loreSection = seriesId ? await buildLoreSection(seriesId) : ""
+
+      // 使用 800 字符 chunk + 200 字符重叠
+      const segments = splitTranslationSegments(chapter.contentOriginal)
+      let translatedContent = ""
+
+      // 预计算本章 embedding
+      let chapterEmbedding: number[] | undefined
+      try {
+        chapterEmbedding = await getEmbedding(chapter.contentOriginal.slice(0, 500))
+      } catch { /* ignore */ }
+
+      const ragCalls: Array<{
+        type: "translation_memory" | "vector_search" | "full_text"
+        content: string
+        score?: number
+        sourceType?: string
+      }> = []
+      const ragKeys = new Set<string>()
+
+      function addRagCall(item: typeof ragCalls[number]) {
+        const key = item.type + "|" + item.content.slice(0, 80)
+        if (!ragKeys.has(key)) {
+          ragKeys.add(key)
+          ragCalls.push(item)
+        }
+      }
+
+      for (const segment of segments) {
+        const fuzzyMatches = await fuzzyTranslationMemoryMatch(
+          segment, input.novelId, seriesId, 3, chapterEmbedding
+        )
+        const ragRef = await hybridSearchForTranslation(
+          segment.slice(0, 200), input.novelId, seriesId, 2, chapterEmbedding
+        )
+
+        for (const m of fuzzyMatches) {
+          addRagCall({ type: "translation_memory", content: m.sourceText, score: m.similarity })
+        }
+        for (const r of ragRef) {
+          addRagCall({ type: r.sourceType === "parallel_corpus" ? "full_text" : "vector_search", content: r.content, score: r.score, sourceType: r.sourceType })
+        }
+
+        const prompt = buildTranslationPrompt(
+          segment, input.style, fuzzyMatches, ragRef, loreSection, input.userPrompt
+        )
+
+        const stream = streamChat({
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.3,
+          maxTokens: 4000,
+        })
+
+        for await (const chunk of stream) {
+          translatedContent += chunk
+        }
+      }
+
+      await db
+        .update(chapters)
+        .set({ contentTranslated: translatedContent.trim() })
+        .where(eq(chapters.id, input.chapterId))
+
+      return { chapterId: chapter.id, content: translatedContent.trim(), ragCalls }
     }),
 
   export: publicQuery
