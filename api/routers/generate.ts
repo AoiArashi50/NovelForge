@@ -3,7 +3,7 @@ import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
 import { characterCards, worldBibles, seriesCanon, fanFictionWorks, plotTropes, novels, chapters, ragFeedback } from "@db/schema"
 import { eq, asc, sql } from "drizzle-orm"
-import { streamChat, getEmbedding } from "../services/deepseek"
+import { streamChat, getEmbedding, chatCompletion } from "../services/deepseek"
 import { searchSimilar } from "../services/embedder"
 
 const WRITING_MODES = [
@@ -614,6 +614,28 @@ export const generateRouter = createRouter({
         maxTokens
       )
 
+      // 若用户未提供标题，自动根据 brief 与生成内容提炼标题
+      let autoTitle: string | undefined
+      if (!input.title || input.title.trim() === "") {
+        try {
+          const titlePrompt = `请根据以下创作 brief 和生成内容的摘要，提炼一个简洁、吸引人的小说标题（不超过 15 个字）。只返回标题文本，不要有任何解释或标点包裹。
+
+创作方向：${input.brief.slice(0, 200)}
+
+内容摘要：${fullContent.slice(0, 500)}`
+          autoTitle = await chatCompletion({
+            messages: [{ role: "user", content: titlePrompt }],
+            temperature: 0.5,
+            maxTokens: 100,
+          })
+          autoTitle = autoTitle.trim().replace(/^["'""'']|["'""'']$/g, "").slice(0, 30)
+        } catch {
+          // 标题生成失败不影响主流程
+        }
+      }
+
+      const finalTitle = input.title?.trim() || autoTitle || `二创_${new Date().toLocaleDateString()}`
+
       // 保存到数据库（将 selectedCharacterIds 存入 parameters）
       const db = getDb()
       const storedParams = {
@@ -627,7 +649,7 @@ export const generateRouter = createRouter({
         .values({
           seriesId: input.seriesId,
           parentNovelId: input.parentNovelId || null,
-          title: input.title || `二创_${new Date().toLocaleDateString()}`,
+          title: finalTitle,
           brief: input.brief,
           parameters: storedParams as unknown as Record<string, unknown>,
           generatedContent: fullContent,
@@ -652,7 +674,7 @@ export const generateRouter = createRouter({
         // 记录失败不影响主流程
       }
 
-      return { content: fullContent, workId: work.id, ragCalls, warnings }
+      return { content: fullContent, workId: work.id, ragCalls, warnings, autoTitle }
     }),
 
   continue: publicQuery

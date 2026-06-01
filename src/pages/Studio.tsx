@@ -260,6 +260,10 @@ export default function Studio() {
 
       setGeneratedWorkId(result.workId)
       setContent(result.content)
+      // 若用户未手动填写标题，自动填充 AI 生成的标题
+      if (result.autoTitle && (!title || title.trim() === "")) {
+        setTitle(result.autoTitle)
+      }
       if (result.ragCalls && result.ragCalls.length > 0) {
         setRagCalls(result.ragCalls)
         setShowRagPanel(true)
