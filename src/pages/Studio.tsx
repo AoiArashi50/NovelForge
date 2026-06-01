@@ -8,7 +8,7 @@ import {
   Lock, Unlock, ChevronRight, Clock,
   Thermometer, Music, FileText, Shield,
   Database, BookText, Wand2, RotateCw, BookOpen,
-  Loader2, X, AlertCircle, Theater, Trash2
+  Loader2, X, AlertCircle, Theater, Trash2,
 } from "lucide-react"
 
 type WritingMode = "canon_continuation" | "character_spinoff" | "original_in_universe" | "alternate_universe"
@@ -23,6 +23,25 @@ interface GenParams {
   writingMode: WritingMode
   ragLimit: number
 }
+
+interface StudioDraft {
+  version: 1
+  savedAt: string
+  selectedSeriesId: number | null
+  selectedParentNovelId: number | null
+  title: string
+  brief: string
+  userPrompt: string
+  params: GenParams
+  selectedCharacterIds: number[]
+  selectedTropeIds: number[]
+  selectedMaterialIds: number[]
+  content: string
+  generatedWorkId: number | null
+}
+
+const DRAFT_KEY = "novelforge_studio_draft"
+const DRAFT_MAX_AGE_DAYS = 7
 
 const DEFAULT_PARAMS: GenParams = {
   temperature: 0.8,
@@ -94,6 +113,11 @@ export default function Studio() {
   const [selectedTropeIds, setSelectedTropeIds] = useState<number[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
 
+  // 本地草稿自动保存
+  const [showDraftBanner, setShowDraftBanner] = useState(false)
+  const [draftInfo, setDraftInfo] = useState<{ savedAt: string } | null>(null)
+  const lastSavedHashRef = useRef<string>("")
+
   // 保存为风格样本
   const [showStyleSampleModal, setShowStyleSampleModal] = useState(false)
   const [styleSampleCharacterTag, setStyleSampleCharacterTag] = useState("")
@@ -156,7 +180,7 @@ export default function Studio() {
   const continueMutation = trpc.generate.continue.useMutation()
   const regenerateMutation = trpc.generate.regenerate.useMutation()
 
-  const { success: toastSuccess } = useToast()
+  const toast = useToast()
 
   const saveAsStyleSampleMutation = trpc.material.saveAsStyleSample.useMutation({
     onSuccess: () => {
@@ -164,7 +188,7 @@ export default function Studio() {
       setShowStyleSampleModal(false)
       setStyleSampleCharacterTag("")
       setStyleSampleSceneTag("")
-      toastSuccess("已保存为风格样本")
+      toast.success("已保存为风格样本")
     },
   })
 
@@ -222,6 +246,60 @@ export default function Studio() {
       }
     }
   }, [loadedWork, workId])
+
+  // 页面加载时检查本地草稿
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY)
+      if (!raw) return
+      const draft = JSON.parse(raw) as StudioDraft
+      if (draft.version !== 1) {
+        localStorage.removeItem(DRAFT_KEY)
+        return
+      }
+      const savedAt = new Date(draft.savedAt)
+      const ageDays = (Date.now() - savedAt.getTime()) / (1000 * 60 * 60 * 24)
+      if (ageDays > DRAFT_MAX_AGE_DAYS) {
+        localStorage.removeItem(DRAFT_KEY)
+        return
+      }
+      // 若用户明确通过 URL 打开了某作品，不提示恢复草稿
+      if (workId && workId !== "undefined") return
+      setShowDraftBanner(true)
+      setDraftInfo({ savedAt: draft.savedAt })
+    } catch {
+      localStorage.removeItem(DRAFT_KEY)
+    }
+  }, [workId])
+
+  // 每 10 秒自动保存草稿（仅在内容有变化时写入）
+  useEffect(() => {
+    const interval = setInterval(() => {
+      // 无任何编辑内容时不保存
+      if (!selectedSeriesId && !brief.trim() && !title.trim() && !content) return
+
+      const draft: StudioDraft = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        selectedSeriesId,
+        selectedParentNovelId,
+        title,
+        brief,
+        userPrompt,
+        params,
+        selectedCharacterIds,
+        selectedTropeIds,
+        selectedMaterialIds,
+        content,
+        generatedWorkId,
+      }
+      const json = JSON.stringify(draft)
+      if (json === lastSavedHashRef.current) return
+      lastSavedHashRef.current = json
+      localStorage.setItem(DRAFT_KEY, json)
+    }, 10000)
+    return () => clearInterval(interval)
+  }, [selectedSeriesId, selectedParentNovelId, title, brief, userPrompt, params, selectedCharacterIds, selectedTropeIds, selectedMaterialIds, content, generatedWorkId])
 
   // 模拟流式显示效果
   useEffect(() => {
@@ -313,7 +391,46 @@ export default function Studio() {
 
   const handleSave = () => {
     if (!generatedWorkId) return
-    saveAsNovelMutation.mutate({ workId: generatedWorkId })
+    saveAsNovelMutation.mutate({ workId: generatedWorkId }, {
+      onSuccess: () => {
+        localStorage.removeItem(DRAFT_KEY)
+        lastSavedHashRef.current = ""
+        toast.success("已保存到小说管理")
+      },
+    })
+  }
+
+  // 恢复草稿
+  const handleRestoreDraft = () => {
+    try {
+      const raw = localStorage.getItem(DRAFT_KEY)
+      if (!raw) return
+      const draft = JSON.parse(raw) as StudioDraft
+      setSelectedSeriesId(draft.selectedSeriesId)
+      setSelectedParentNovelId(draft.selectedParentNovelId)
+      setTitle(draft.title)
+      setBrief(draft.brief)
+      setUserPrompt(draft.userPrompt)
+      setParams(draft.params)
+      setSelectedCharacterIds(draft.selectedCharacterIds)
+      setSelectedTropeIds(draft.selectedTropeIds)
+      setSelectedMaterialIds(draft.selectedMaterialIds)
+      setContent(draft.content)
+      setDisplayContent(draft.content)
+      setGeneratedWorkId(draft.generatedWorkId)
+      setShowDraftBanner(false)
+      toast.info("草稿已恢复")
+    } catch {
+      localStorage.removeItem(DRAFT_KEY)
+    }
+  }
+
+  // 丢弃草稿
+  const handleDiscardDraft = () => {
+    localStorage.removeItem(DRAFT_KEY)
+    lastSavedHashRef.current = ""
+    setShowDraftBanner(false)
+    toast.info("草稿已丢弃")
   }
 
   // 导出
@@ -420,6 +537,31 @@ export default function Studio() {
       <div className="flex h-[calc(100vh-3.5rem)]">
         {/* 左侧编辑区 */}
         <div className="flex-1 flex flex-col min-w-0">
+          {/* 草稿恢复横幅 */}
+          {showDraftBanner && draftInfo && (
+            <div className="shrink-0 px-6 py-2.5 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm">
+                <Clock className="w-4 h-4 text-amber-400" />
+                <span className="text-white/70">
+                  发现 {formatTimeAgo(draftInfo.savedAt)} 的未保存草稿
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={handleRestoreDraft}
+                  className="px-3 py-1 rounded-full bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 text-xs transition-colors"
+                >
+                  恢复编辑
+                </button>
+                <button
+                  onClick={handleDiscardDraft}
+                  className="px-3 py-1 rounded-full bg-white/5 hover:bg-white/10 text-white/50 hover:text-white/70 text-xs transition-colors"
+                >
+                  丢弃
+                </button>
+              </div>
+            </div>
+          )}
           {/* 顶部操作栏 */}
           <header className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-[#111827]/90 backdrop-blur-md">
             <div className="flex items-center gap-3">
@@ -1354,6 +1496,22 @@ function CustomSelect({
       )}
     </div>
   )
+}
+
+// 格式化相对时间（如：2小时前）
+function formatTimeAgo(isoString: string): string {
+  const date = new Date(isoString)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffMins = Math.floor(diffMs / (1000 * 60))
+  const diffHours = Math.floor(diffMs / (1000 * 60 * 60))
+  const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24))
+
+  if (diffMins < 1) return "刚刚"
+  if (diffMins < 60) return `${diffMins}分钟前`
+  if (diffHours < 24) return `${diffHours}小时前`
+  if (diffDays < 7) return `${diffDays}天前`
+  return date.toLocaleDateString()
 }
 
 // 参数滑块组件
