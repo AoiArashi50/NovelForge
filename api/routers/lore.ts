@@ -4,7 +4,7 @@ import { getDb } from "../queries/connection"
 import { series, characterCards, worldBibles, seriesCanon, materials, plotTropes } from "@db/schema"
 import { eq, asc, inArray, sql, and } from "drizzle-orm"
 import { chatCompletion } from "../services/deepseek"
-import { findDuplicateGroups, recommendKeepId } from "../lib/dedup-utils"
+import { findDuplicateGroups, recommendKeepId, findDuplicateAspectGroups, mergeDuplicateAspects } from "../lib/dedup-utils"
 
 export const loreRouter = createRouter({
   // Series
@@ -521,10 +521,79 @@ ${truncated}
           content: a.content,
         }))
 
+        // 对提取的 aspects 做去重合并（防止 AI 返回同名/近似维度）
+        const dupGroups = findDuplicateAspectGroups(aspectsWithId)
+        const dedupedAspects = dupGroups.length > 0
+          ? mergeDuplicateAspects(aspectsWithId, dupGroups)
+          : aspectsWithId
+
         return {
-          aspects: aspectsWithId,
+          aspects: dedupedAspects,
           factions: validated.factions,
           timelineEvents: validated.timelineEvents,
+        }
+      }),
+
+    // 检测世界观中的重复维度
+    findDuplicateAspects: publicQuery
+      .input(z.object({ seriesId: z.number() }))
+      .query(async ({ input }) => {
+        const db = getDb()
+        const [wb] = await db
+          .select()
+          .from(worldBibles)
+          .where(eq(worldBibles.seriesId, input.seriesId))
+
+        if (!wb) return { groups: [], totalAspects: 0 }
+
+        const aspects = (wb.aspects || []) as Array<{ id: string; name: string; content: string }>
+        const groups = findDuplicateAspectGroups(aspects)
+
+        return {
+          groups,
+          totalAspects: aspects.length,
+          duplicateCount: groups.length,
+        }
+      }),
+
+    // 合并世界观中的重复维度
+    mergeAspects: publicQuery
+      .input(z.object({
+        seriesId: z.number(),
+        groupIds: z.array(z.string()).min(1),
+      }))
+      .mutation(async ({ input }) => {
+        const db = getDb()
+        const [wb] = await db
+          .select()
+          .from(worldBibles)
+          .where(eq(worldBibles.seriesId, input.seriesId))
+
+        if (!wb) throw new Error("世界观不存在")
+
+        const aspects = (wb.aspects || []) as Array<{ id: string; name: string; content: string }>
+        const allGroups = findDuplicateAspectGroups(aspects)
+        const targetGroups = allGroups.filter(g =>
+          input.groupIds.some(targetId => g.ids.includes(targetId))
+        )
+
+        if (targetGroups.length === 0) throw new Error("未找到指定的重复维度组")
+
+        const merged = mergeDuplicateAspects(aspects, targetGroups)
+
+        const [updated] = await db
+          .update(worldBibles)
+          .set({
+            aspects: merged as unknown as Record<string, unknown>[],
+            updatedAt: new Date(),
+          })
+          .where(eq(worldBibles.id, wb.id))
+          .returning()
+
+        return {
+          mergedCount: targetGroups.reduce((sum, g) => sum + g.ids.length - 1, 0),
+          remainingAspects: merged.length,
+          updated,
         }
       }),
   }),
