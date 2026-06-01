@@ -26,6 +26,7 @@ export const novelRouter = createRouter({
       title: z.string().min(1),
       author: z.string().optional(),
       originalLanguage: z.string().optional(),
+      seriesId: z.number().optional(),
     }))
     .mutation(async ({ input }) => {
       const db = getDb()
@@ -42,6 +43,7 @@ export const novelRouter = createRouter({
       title: z.string().optional(),
       author: z.string().optional(),
       status: z.enum(["unread", "reading", "translated", "completed"]).optional(),
+      seriesId: z.number().optional(),
     }))
     .mutation(async ({ input }) => {
       const db = getDb()

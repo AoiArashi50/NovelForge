@@ -17,6 +17,7 @@ export const novels = pgTable("novels", {
   title: varchar("title", { length: 500 }).notNull(),
   author: varchar("author", { length: 200 }),
   originalLanguage: varchar("original_language", { length: 50 }),
+  seriesId: integer("series_id"),
   status: varchar("status", { length: 50 }).notNull().default("unread"),
   filePath: varchar("file_path", { length: 1000 }),
   contentOriginal: text("content_original"),

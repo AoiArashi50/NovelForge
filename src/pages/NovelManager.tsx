@@ -21,6 +21,7 @@ export default function NovelManager() {
   const { data: novels, isLoading } = trpc.novel.list.useQuery()
   const { data: allTags } = trpc.tag.list.useQuery()
   const { data: tagMap } = trpc.novel.tagMap.useQuery()
+  const { data: seriesList } = trpc.lore.series.list.useQuery()
   const createMutation = trpc.novel.create.useMutation({
     onSuccess: () => utils.novel.list.invalidate(),
   })
@@ -65,6 +66,8 @@ export default function NovelManager() {
   const [exportFormat, setExportFormat] = useState<"pure" | "parallel">("pure")
 
   const [tagNovel, setTagNovel] = useState<NovelItem | null>(null)
+  const [bindSeriesNovel, setBindSeriesNovel] = useState<NovelItem | null>(null)
+  const [selectedSeriesForBind, setSelectedSeriesForBind] = useState<number | null>(null)
 
   const [searchQuery, setSearchQuery] = useState("")
   const [openMenuId, setOpenMenuId] = useState<number | null>(null)
@@ -374,7 +377,7 @@ export default function NovelManager() {
                     </div>
                   )}
 
-                  <div className="flex items-center gap-2 mb-2">
+                  <div className="flex items-center gap-2 mb-2 flex-wrap">
                     <span className={`px-2 py-0.5 rounded-full text-xs font-mono ${
                       novel.status === "translated"
                         ? "bg-green-500/20 text-green-400"
@@ -384,6 +387,11 @@ export default function NovelManager() {
                     }`}>
                       {novel.status === "translated" ? "已翻译" : novel.status === "reading" ? "阅读中" : "未读"}
                     </span>
+                    {novel.seriesId && seriesList && (
+                      <span className="px-2 py-0.5 rounded-full text-xs font-mono bg-blue-500/10 text-blue-400">
+                        {seriesList.find(s => s.id === novel.seriesId)?.name || "系列"}
+                      </span>
+                    )}
                   </div>
 
                   {/* Dropdown menu */}
@@ -430,6 +438,17 @@ export default function NovelManager() {
                         className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/5 text-left text-sm text-white/70 hover:text-amber-400 transition-colors"
                       >
                         <Tag className="w-3.5 h-3.5" /> 编辑标签
+                      </button>
+                      <button
+                        onClick={() => {
+                          setOpenMenuId(null)
+                          setBindSeriesNovel(novel)
+                          setSelectedSeriesForBind(novel.seriesId || null)
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/5 text-left text-sm text-white/70 hover:text-amber-400 transition-colors"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                        {novel.seriesId ? "更换系列" : "绑定系列"}
                       </button>
                       <button
                         onClick={() => {
@@ -612,6 +631,69 @@ export default function NovelManager() {
                   </button>
                 )
               })}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bind Series Modal */}
+      {bindSeriesNovel && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md p-6 rounded-2xl bg-[#1F2937] border border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <svg className="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                <h3 className="font-serif text-lg font-semibold">
+                  {bindSeriesNovel.seriesId ? "更换系列" : "绑定系列"}
+                </h3>
+              </div>
+              <button onClick={() => { setBindSeriesNovel(null); setSelectedSeriesForBind(null); }} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-white/70 text-sm mb-4 font-mono">《{bindSeriesNovel.title}》</p>
+            <div className="space-y-2 mb-6">
+              {(seriesList || []).map(s => (
+                <button
+                  key={s.id}
+                  onClick={() => setSelectedSeriesForBind(s.id)}
+                  className={`w-full text-left px-4 py-2.5 rounded-xl text-sm transition-colors ${
+                    selectedSeriesForBind === s.id
+                      ? "bg-amber-500/20 border border-amber-500/30 text-amber-400"
+                      : "bg-white/5 border border-transparent hover:bg-white/10 text-white/60"
+                  }`}
+                >
+                  {s.name}
+                </button>
+              ))}
+              {(!seriesList || seriesList.length === 0) && (
+                <p className="text-white/40 text-sm text-center py-4">暂无系列，请先在设定库中创建</p>
+              )}
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={() => {
+                  if (!bindSeriesNovel || !selectedSeriesForBind) return
+                  updateMutation.mutate({
+                    id: bindSeriesNovel.id,
+                    seriesId: selectedSeriesForBind,
+                  }, {
+                    onSuccess: () => {
+                      toast.success(`已绑定到「${seriesList?.find(s => s.id === selectedSeriesForBind)?.name}」`)
+                      setBindSeriesNovel(null)
+                      setSelectedSeriesForBind(null)
+                    },
+                  })
+                }}
+                disabled={!selectedSeriesForBind || updateMutation.isPending}
+                className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium text-sm transition-colors"
+              >
+                {updateMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : "确认绑定"}
+              </button>
+              <button
+                onClick={() => { setBindSeriesNovel(null); setSelectedSeriesForBind(null); }}
+                className="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-full text-sm"
+              >
+                取消
+              </button>
             </div>
           </div>
         </div>
