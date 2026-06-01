@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 All four implementation phases (0–3) are complete. The codebase contains a working React frontend, Hono + tRPC backend, PostgreSQL database with pgvector, and Docker deployment configuration. Design documents (frozen) live in `propmt/` and `ProjectGoal.md`.
 
+**Active roadmap**: `docs/ROADMAP.md` contains the current iteration plan — RAG flywheel optimization (semantic chunking, source traceability, generated-content feedback loop, style auto-extraction). Agents should read it before starting new features.
+
 ## Design Documents (Frozen)
 
 | File | Purpose |
@@ -139,7 +141,9 @@ Defined in `api/lib/env.ts` (Zod-validated at boot):
 | `/*` | Static files | `dist/public/` in production |
 | `/*` (fallback) | SPA index.html | React Router handles client-side routing |
 
-`tRPC` routers registered in `api/router.ts`: `novel`, `chapter`, `translate`, `lore`, `tag`, `material`, `generate`, `rag`, `annotation`.
+`tRPC` routers registered in `api/router.ts`: `novel`, `chapter`, `translate`, `lore`, `tag`, `material`, `generate`, `rag`, `annotation`, `trope`.
+
+**Note on upload**: `/api/upload` is a standalone Hono router (`api/routers/upload.ts`), mounted directly in `api/boot.ts` — it is **not** part of the tRPC router.
 
 ## Frontend Routes
 
@@ -176,6 +180,22 @@ Key tables (defined in `db/schema.ts`):
 - `vector_chunks` / `translation_memory`: pgvector-backed RAG storage (1536-dim embeddings)
 - `fan_fiction_works`: generated content with parameters
 - `materials`: user-fed RAG corpus with indexing status
+
+### Recently Added APIs
+
+**`material` router:**
+- `autoExtractLore({ materialId, seriesId? })` — one-click extract characters + worldBible from a material, auto-save to lore library with upsert/merge logic (no manual confirmation)
+- `batchAutoExtract({ materialIds, seriesId })` — serially call `autoExtractLore` for multiple materials
+
+**`lore` router:**
+- `series.summary({ seriesId })` — returns aggregate counts: characterCount, worldBibleAspectCount, canonEventCount, tropeCount, materialCount
+
+**`novel` router:**
+- `importMaterials({ materialIds })` — batch import selected materials into novel manager as novels+chapters
+
+**`generate` router:**
+- `saveAsNovel({ workId })` — persist a `fanFictionWorks` record into `novels` + `chapters`
+- `deleteWork({ id })` — remove a fan-fiction work from history
 
 ### RAG Pipeline (Hybrid Search)
 Every retrieval query must execute both:
@@ -230,6 +250,37 @@ These constraints were discovered during implementation and must be respected:
 8. **No handwritten SQL.** All DB operations through Drizzle ORM.
 9. **File storage:** local filesystem (volume-mounted). No cloud object storage.
 10. **No real-time streaming infra.** Streamed AI responses handled via client polling or simulated typing.
+
+## Known Code Traps
+
+These are current bugs / limitations in the codebase that will bite you if you are not aware of them:
+
+### `vectorChunks.metadata` lacks source traceability
+`vector_chunks.metadata` currently only stores `{ indexedAt: string }`. There is **no** `sourceId`, `sourceTitle`, `chapterNumber`, or `chunkIndex`. The `searchSimilar` function does not return these fields either, so the RAG injection in `generate.ts` cannot tell the user *which* novel/chapter a chunk came from.
+
+**Fix direction**: enrich `metadata` during `indexNovel` (see `docs/ROADMAP.md` P0-1).
+
+### Full-text search uses `'simple'` config (Chinese-incompatible)
+`generate.ts` line ~300 uses `to_tsvector('simple', content)`. The `simple` configuration splits text on whitespace only, which means **Chinese full-text search is effectively broken** — it cannot match individual Chinese words.
+
+**Fix direction**: supplement with `pg_trgm` fuzzy matching (see `docs/ROADMAP.md` P0-3).
+
+### `searchSimilar.materialFilter` is silently dead code
+`embedder.ts` line ~80:
+```typescript
+materialFilter = sql`metadata->>'materialId' IN (${ids})`
+```
+This will **never match** because:
+1. `metadata->>'materialId'` returns a JSON string value, not a Postgres integer
+2. The `IN` clause is comparing strings against a comma-separated string literal, not a list
+3. `indexNovel` stores chunks under `novelId`, not `materialId` anyway
+
+**Workaround**: filter by `seriesId` and `novelId` instead.
+
+### RAG chunking is too aggressive
+`embedder.ts` uses a fixed 500-character sliding window with 100-character overlap. This cuts through dialogue, scenes, and character relationships. Retrieved chunks often lack enough context for the LLM to understand who is speaking or what is happening.
+
+**Fix direction**: semantic chunking (scene/paragraph boundary aware) — see `docs/ROADMAP.md` P0-1.
 
 ## Adding a New tRPC Router
 
