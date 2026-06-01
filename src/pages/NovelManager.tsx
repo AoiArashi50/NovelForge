@@ -1,6 +1,7 @@
 import { useNavigate } from "react-router"
 import { trpc } from "@/providers/trpc"
-import { useState, useMemo, useRef } from "react"
+import { useState, useMemo, useCallback } from "react"
+import { useDropzone } from "react-dropzone"
 import NavBar from "@/components/NavBar"
 import type { inferRouterOutputs } from "@trpc/server"
 import type { AppRouter } from "../../api/router"
@@ -66,7 +67,19 @@ export default function NovelManager() {
   const [searchQuery, setSearchQuery] = useState("")
   const [openMenuId, setOpenMenuId] = useState<number | null>(null)
 
-  const fileInputRef = useRef<HTMLInputElement>(null)
+  const onDrop = useCallback((acceptedFiles: File[]) => {
+    setFiles(prev => [...prev, ...acceptedFiles])
+  }, [])
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'text/plain': ['.txt'],
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'],
+      'application/pdf': ['.pdf'],
+    },
+    multiple: true,
+  })
 
   const filteredNovels = useMemo(() => {
     if (!novels) return []
@@ -224,18 +237,32 @@ export default function NovelManager() {
 
             <div>
               <label className="block font-mono text-xs text-white/70 mb-2">上传文件（txt/docx/pdf，可多选批量上传）</label>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".txt,.docx,.pdf"
-                multiple
-                onChange={e => setFiles(Array.from(e.target.files || []))}
-                className="w-full px-4 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-white/70 file:mr-4 file:py-1 file:px-3 file:rounded-full file:border-0 file:bg-amber-500/20 file:text-amber-400 file:text-xs"
-              />
+              <div
+                {...getRootProps()}
+                className={`w-full px-4 py-6 rounded-xl border-2 border-dashed text-center cursor-pointer transition-colors ${
+                  isDragActive
+                    ? 'border-amber-500 bg-amber-500/10'
+                    : 'border-white/20 bg-white/5 hover:border-white/40'
+                }`}
+              >
+                <input {...getInputProps()} />
+                <Upload className="w-6 h-6 mx-auto mb-2 text-white/40" />
+                {isDragActive ? (
+                  <p className="text-amber-400 text-sm">松开以添加文件...</p>
+                ) : (
+                  <p className="text-white/50 text-sm">拖拽文件到此处，或点击选择</p>
+                )}
+                <p className="text-white/30 text-xs mt-1 font-mono">支持 .txt / .docx / .pdf</p>
+              </div>
               {files.length > 0 && (
                 <div className="mt-2 space-y-1">
                   {files.map((f, i) => (
-                    <p key={i} className="text-white/40 text-xs font-mono truncate">{i + 1}. {f.name}</p>
+                    <div key={i} className="flex items-center justify-between text-white/40 text-xs font-mono">
+                      <span className="truncate">{i + 1}. {f.name}</span>
+                      <button onClick={() => setFiles(prev => prev.filter((_, idx) => idx !== i))} className="text-white/30 hover:text-red-400 ml-2">
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
                   ))}
                 </div>
               )}

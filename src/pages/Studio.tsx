@@ -7,7 +7,7 @@ import {
   Lock, Unlock, ChevronRight, Clock,
   Thermometer, Music, FileText, Shield,
   Database, BookText, Wand2, RotateCw, BookOpen,
-  Loader2, X, AlertCircle, Theater
+  Loader2, X, AlertCircle, Theater, Trash2
 } from "lucide-react"
 
 type WritingMode = "canon_continuation" | "character_spinoff" | "original_in_universe" | "alternate_universe"
@@ -79,11 +79,24 @@ export default function Studio() {
   const [useMaterials, setUseMaterials] = useState(true)
   const [selectedMaterialIds, setSelectedMaterialIds] = useState<number[]>([])
   const [isTyping, setIsTyping] = useState(false)
-  const [ragCalls, setRagCalls] = useState<Array<{ type: string; content: string; score?: number }> | null>(null)
+  const [ragCalls, setRagCalls] = useState<Array<{
+    type: string
+    content: string
+    score?: number
+    sourceTitle?: string
+    chapterNumber?: number
+    chunkIndex?: number
+    totalChunks?: number
+  }> | null>(null)
   const [showRagPanel, setShowRagPanel] = useState(false)
   const [selectedCharacterIds, setSelectedCharacterIds] = useState<number[]>([])
   const [selectedTropeIds, setSelectedTropeIds] = useState<number[]>([])
   const [warnings, setWarnings] = useState<string[]>([])
+
+  // 保存为风格样本
+  const [showStyleSampleModal, setShowStyleSampleModal] = useState(false)
+  const [styleSampleCharacterTag, setStyleSampleCharacterTag] = useState("")
+  const [styleSampleSceneTag, setStyleSampleSceneTag] = useState("")
 
   // 查询该系列的桥段
   const { data: seriesTropes } = trpc.trope.list.useQuery(
@@ -135,6 +148,32 @@ export default function Studio() {
 
   const continueMutation = trpc.generate.continue.useMutation()
   const regenerateMutation = trpc.generate.regenerate.useMutation()
+
+  const saveAsStyleSampleMutation = trpc.material.saveAsStyleSample.useMutation({
+    onSuccess: () => {
+      utils.material.list.invalidate()
+      setShowStyleSampleModal(false)
+      setStyleSampleCharacterTag("")
+      setStyleSampleSceneTag("")
+      alert("已保存为风格样本")
+    },
+  })
+
+  const deleteWorkMutation = trpc.generate.deleteWork.useMutation({
+    onSuccess: () => {
+      utils.generate.list.invalidate()
+      if (generatedWorkId && !worksList?.some(w => w.id === generatedWorkId)) {
+        setGeneratedWorkId(null)
+        setContent("")
+        setDisplayContent("")
+      }
+    },
+  })
+
+  // RAG 反馈闭环
+  const feedbackMutation = trpc.rag.feedback.useMutation()
+  const [feedbackState, setFeedbackState] = useState<"pending" | "helpful" | "unhelpful" | null>(null)
+  const [showFeedbackDetail, setShowFeedbackDetail] = useState(false)
 
   // 加载已有作品
   const { data: loadedWork } = trpc.generate.getWork.useQuery(
@@ -202,6 +241,8 @@ export default function Studio() {
     setIsGenerating(true)
     setContent("")
     setDisplayContent("")
+    setFeedbackState(null)
+    setShowFeedbackDetail(false)
 
     try {
       const result = await generateMutation.mutateAsync({
@@ -277,6 +318,8 @@ export default function Studio() {
   const handleContinue = async () => {
     if (!generatedWorkId || isGenerating) return
     setIsGenerating(true)
+    setFeedbackState(null)
+    setShowFeedbackDetail(false)
     try {
       const result = await continueMutation.mutateAsync({
         workId: generatedWorkId,
@@ -404,6 +447,14 @@ export default function Studio() {
                 保存
               </button>
               <button
+                onClick={() => setShowStyleSampleModal(true)}
+                disabled={!content || !selectedSeriesId}
+                className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-amber-500/20 hover:bg-amber-500/30 disabled:opacity-30 text-amber-400 text-sm transition-colors"
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                保存为风格样本
+              </button>
+              <button
                 onClick={handleExport}
                 disabled={!content}
                 className="flex items-center gap-2 px-4 py-1.5 rounded-full bg-white/5 hover:bg-white/10 disabled:opacity-30 text-sm transition-colors"
@@ -437,11 +488,26 @@ export default function Studio() {
                       >
                         <div className="flex items-center justify-between mb-2">
                           <h3 className="font-serif text-lg font-semibold">{work.title || `作品 #${work.id}`}</h3>
-                          <span className={`px-2 py-0.5 rounded-full text-xs font-mono ${
-                            work.status === "saved" ? "bg-green-500/20 text-green-400" : "bg-white/10 text-white/50"
-                          }`}>
-                            {work.status === "saved" ? "已保存" : "草稿"}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            <span className={`px-2 py-0.5 rounded-full text-xs font-mono ${
+                              work.status === "saved" ? "bg-green-500/20 text-green-400" : "bg-white/10 text-white/50"
+                            }`}>
+                              {work.status === "saved" ? "已保存" : "草稿"}
+                            </span>
+                            <button
+                              onClick={e => {
+                                e.stopPropagation()
+                                if (confirm(`确定删除「${work.title || `作品 #${work.id}`}」？此操作不可撤销。`)) {
+                                  deleteWorkMutation.mutate({ id: work.id })
+                                }
+                              }}
+                              disabled={deleteWorkMutation.isPending}
+                              className="p-1.5 rounded-lg hover:bg-red-500/20 text-white/30 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
+                              title="删除"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </div>
                         </div>
                         <p className="text-white/40 text-sm line-clamp-2 mb-2">{work.brief}</p>
                         <p className="text-white/20 text-xs font-mono">
@@ -543,6 +609,70 @@ export default function Studio() {
                   <Database className="w-4 h-4" />
                   查看 RAG 检索详情 ({ragCalls.length} 条)
                 </button>
+              </div>
+            )}
+
+            {/* RAG 反馈闭环 — 👍/👎 */}
+            {content && generatedWorkId && activeTab === "edit" && feedbackState !== "helpful" && (
+              <div className="max-w-3xl mx-auto mt-4">
+                {feedbackState === null ? (
+                  <div className="flex items-center justify-center gap-3 py-2">
+                    <span className="text-white/40 text-sm">本次生成满意吗？</span>
+                    <button
+                      onClick={() => {
+                        if (generatedWorkId) {
+                          feedbackMutation.mutate({ generationId: generatedWorkId, wasHelpful: true })
+                          setFeedbackState("helpful")
+                        }
+                      }}
+                      className="px-4 py-1.5 rounded-full bg-green-500/10 hover:bg-green-500/20 text-green-400 text-sm transition-colors"
+                    >
+                      👍 满意
+                    </button>
+                    <button
+                      onClick={() => setFeedbackState("unhelpful")}
+                      className="px-4 py-1.5 rounded-full bg-red-500/10 hover:bg-red-500/20 text-red-400 text-sm transition-colors"
+                    >
+                      👎 不满意
+                    </button>
+                  </div>
+                ) : feedbackState === "unhelpful" ? (
+                  <div className="p-4 rounded-xl bg-white/5 border border-white/10">
+                    <p className="text-white/60 text-sm mb-3">哪方面不对？（可多选）</p>
+                    <div className="flex flex-wrap gap-2 mb-3">
+                      {["角色性格不对（OOC）", "风格不像原作", "世界观矛盾", "其他"].map(reason => (
+                        <button
+                          key={reason}
+                          onClick={() => {
+                            if (generatedWorkId) {
+                              feedbackMutation.mutate({ generationId: generatedWorkId, wasHelpful: false, reason })
+                              setShowFeedbackDetail(true)
+                            }
+                          }}
+                          className="px-3 py-1.5 rounded-full bg-white/5 hover:bg-red-500/20 text-white/60 hover:text-red-400 text-xs transition-colors"
+                        >
+                          {reason}
+                        </button>
+                      ))}
+                    </div>
+                    <button
+                      onClick={() => setFeedbackState(null)}
+                      className="text-white/30 hover:text-white/60 text-xs"
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : null}
+              </div>
+            )}
+            {feedbackState === "helpful" && (
+              <div className="max-w-3xl mx-auto mt-4 text-center">
+                <span className="text-green-400 text-sm">✓ 感谢反馈，已记录</span>
+              </div>
+            )}
+            {showFeedbackDetail && (
+              <div className="max-w-3xl mx-auto mt-4 text-center">
+                <span className="text-white/40 text-sm">✓ 反馈已提交，我们会据此优化素材检索</span>
               </div>
             )}
 
@@ -1036,7 +1166,7 @@ export default function Studio() {
             <div className="space-y-3">
               {ragCalls.map((call, i) => (
                 <div key={i} className="p-3 rounded-xl bg-white/5 border border-white/10">
-                  <div className="flex items-center gap-2 mb-1">
+                  <div className="flex items-center gap-2 mb-1 flex-wrap">
                     <span className={
                       call.type === "novel_style" ? "text-amber-400 text-xs font-mono" :
                       call.type === "material" ? "text-green-400 text-xs font-mono" :
@@ -1048,10 +1178,81 @@ export default function Studio() {
                     {call.score !== undefined && (
                       <span className="text-white/40 text-xs font-mono">相似度: {(call.score * 100).toFixed(1)}%</span>
                     )}
+                    {call.sourceTitle && (
+                      <span className="text-white/60 text-xs font-mono ml-auto">
+                        📎 {call.sourceTitle}
+                        {call.chapterNumber !== undefined ? ` · 第${call.chapterNumber}章` : ""}
+                        {call.chunkIndex !== undefined && call.totalChunks !== undefined ? ` · 片段 ${call.chunkIndex + 1}/${call.totalChunks}` : ""}
+                      </span>
+                    )}
                   </div>
                   <p className="text-white/80 text-sm line-clamp-4">{call.content}</p>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 保存为风格样本对话框 */}
+      {showStyleSampleModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md p-6 rounded-2xl bg-[#1F2937] border border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-serif text-lg font-semibold">保存为风格样本</h3>
+              <button onClick={() => setShowStyleSampleModal(false)} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-white/60 text-sm mb-4">将本次生成内容保存到素材池，作为风格样本反哺后续生成。</p>
+            <div className="space-y-3 mb-4">
+              <div>
+                <label className="block text-xs text-white/50 font-mono mb-1">角色标签（可选）</label>
+                <select
+                  value={styleSampleCharacterTag}
+                  onChange={e => setStyleSampleCharacterTag(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-[#FDFBF5] text-sm outline-none focus:border-amber-500"
+                >
+                  <option value="">通用</option>
+                  {characters?.map(c => (
+                    <option key={c.id} value={c.name}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-white/50 font-mono mb-1">场景标签（可选）</label>
+                <select
+                  value={styleSampleSceneTag}
+                  onChange={e => setStyleSampleSceneTag(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-[#FDFBF5] text-sm outline-none focus:border-amber-500"
+                >
+                  <option value="">通用</option>
+                  <option value="战斗描写">战斗描写</option>
+                  <option value="对话">对话</option>
+                  <option value="心理活动">心理活动</option>
+                  <option value="环境描写">环境描写</option>
+                </select>
+              </div>
+            </div>
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setShowStyleSampleModal(false)}
+                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 text-sm"
+              >取消</button>
+              <button
+                onClick={() => {
+                  if (!selectedSeriesId) return
+                  saveAsStyleSampleMutation.mutate({
+                    content,
+                    seriesId: selectedSeriesId,
+                    characterTag: styleSampleCharacterTag || undefined,
+                    sceneTag: styleSampleSceneTag || undefined,
+                    sourceWorkId: generatedWorkId || undefined,
+                  })
+                }}
+                disabled={saveAsStyleSampleMutation.isPending}
+                className="px-4 py-2 rounded-full bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] text-sm font-medium"
+              >
+                {saveAsStyleSampleMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : "确认保存"}
+              </button>
             </div>
           </div>
         </div>

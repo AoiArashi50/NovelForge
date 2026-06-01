@@ -1,5 +1,7 @@
 import { trpc } from "@/providers/trpc"
 import { useState, useEffect } from "react"
+import { Controller } from "react-hook-form"
+import { useCharacterForm, formDataToCharacterPayload } from "@/hooks/useCharacterForm"
 import NavBar from "@/components/NavBar"
 import {
   Plus, Users, Globe, BookMarked, Trash2, Edit, X, Save,
@@ -7,6 +9,9 @@ import {
   Database, BookOpen, Theater, CheckCircle, AlertCircle,
 } from "lucide-react"
 import Modal from "@/components/Modal"
+import LoreStatsChart from "@/components/LoreStatsChart"
+import { SortableList } from "@/components/SortableList"
+import RichTextEditor from "@/components/RichTextEditor"
 
 export default function LoreLibrary() {
   const utils = trpc.useUtils()
@@ -34,15 +39,8 @@ export default function LoreLibrary() {
     timelineEvents: Array<{ order: number; description: string }>
   } | null>(null)
 
-  // Character form fields
-  const [charName, setCharName] = useState("")
-  const [charAliases, setCharAliases] = useState("")
-  const [charAge, setCharAge] = useState("")
-  const [charPersonality, setCharPersonality] = useState("")
-  const [charMotivations, setCharMotivations] = useState("")
-  const [charSpeech, setCharSpeech] = useState("")
-  const [charTaboos, setCharTaboos] = useState("")
-  const [charArc, setCharArc] = useState("")
+  // Character form (React Hook Form)
+  const charForm = useCharacterForm()
 
   // World Bible form
   const [wbGeography, setWbGeography] = useState("")
@@ -82,6 +80,23 @@ export default function LoreLibrary() {
   const [extractTaskId, setExtractTaskId] = useState<number | null>(null)
   const [showExtractProgress, setShowExtractProgress] = useState(false)
 
+  // 角色重复检测与合并
+  const [showMergeModal, setShowMergeModal] = useState(false)
+  const [mergeTargetId, setMergeTargetId] = useState<number | null>(null)
+  const [selectedMergeIds, setSelectedMergeIds] = useState<Set<number>>(new Set())
+  const { data: duplicateData } = trpc.lore.character.findDuplicates.useQuery(
+    { seriesId: selectedSeriesId || 0 },
+    { enabled: !!selectedSeriesId && showMergeModal }
+  )
+  const mergeCharacters = trpc.lore.character.merge.useMutation({
+    onSuccess: () => {
+      utils.lore.character.list.invalidate()
+      setShowMergeModal(false)
+      setMergeTargetId(null)
+      setSelectedMergeIds(new Set())
+    },
+  })
+
   const createSeries = trpc.lore.series.create.useMutation({
     onSuccess: () => {
       utils.lore.series.list.invalidate()
@@ -118,6 +133,13 @@ export default function LoreLibrary() {
   const deleteCharacter = trpc.lore.character.delete.useMutation({
     onSuccess: () => utils.lore.character.list.invalidate(),
   })
+  const extractStyleProfile = trpc.lore.character.extractStyleProfile.useMutation({
+    onSuccess: (data) => {
+      utils.lore.character.list.invalidate()
+      alert(`风格提炼完成！\n\n高频用词: ${(data.vocabulary as string[] || []).join(", ")}\n情感基调: ${data.emotionalTone}\n对话风格: ${data.dialogueStyle}`)
+    },
+    onError: (err) => alert(err.message),
+  })
 
   const { data: characters } = trpc.lore.character.list.useQuery(
     { seriesId: selectedSeriesId || 0 },
@@ -130,6 +152,9 @@ export default function LoreLibrary() {
   const upsertWorldBible = trpc.lore.worldBible.createOrUpdate.useMutation({
     onSuccess: () => utils.lore.worldBible.get.invalidate({ seriesId: selectedSeriesId || 0 }),
   })
+  const reorderAspectsMutation = trpc.lore.worldBible.reorderAspects.useMutation({
+    onSuccess: () => utils.lore.worldBible.get.invalidate({ seriesId: selectedSeriesId || 0 }),
+  })
   const { data: canonEvents } = trpc.lore.canon.list.useQuery(
     { seriesId: selectedSeriesId || 0 },
     { enabled: !!selectedSeriesId }
@@ -140,12 +165,59 @@ export default function LoreLibrary() {
   const deleteCanon = trpc.lore.canon.delete.useMutation({
     onSuccess: () => utils.lore.canon.list.invalidate({ seriesId: selectedSeriesId || 0 }),
   })
+  const reorderCanon = trpc.lore.canon.reorder.useMutation({
+    onSuccess: () => utils.lore.canon.list.invalidate({ seriesId: selectedSeriesId || 0 }),
+  })
   const summarizeWorldMutation = trpc.lore.summarizeWorld.useMutation({
     onSuccess: (data) => {
       setSummarizedWorld(data)
       setShowSummarizeModal(true)
     },
   })
+
+  // 系列完整度统计
+  const { data: seriesSummary } = trpc.lore.series.summary.useQuery(
+    { seriesId: selectedSeriesId || 0 },
+    { enabled: !!selectedSeriesId }
+  )
+
+  // 批量补全（提取未提取素材）—— 异步轮询模式
+  const [batchTaskId, setBatchTaskId] = useState<string | null>(null)
+
+  const batchAutoExtractMutation = trpc.material.batchAutoExtract.useMutation({
+    onSuccess: (data) => {
+      setBatchTaskId(data.taskId)
+    },
+    onError: (err) => {
+      alert(`补全启动失败：${err.message}`)
+      setBatchTaskId(null)
+    },
+  })
+
+  const { data: batchStatus } = trpc.material.batchAutoExtractStatus.useQuery(
+    { taskId: batchTaskId! },
+    {
+      enabled: batchTaskId !== null,
+      refetchInterval: (query) => {
+        const data = query.state.data
+        return data?.status === "running" ? 2000 : false
+      },
+    }
+  )
+
+  useEffect(() => {
+    if (batchStatus?.status === "completed" || batchStatus?.status === "failed") {
+      utils.lore.character.list.invalidate()
+      utils.lore.worldBible.get.invalidate()
+      utils.lore.series.summary.invalidate({ seriesId: selectedSeriesId || 0 })
+      if (batchStatus.status === "completed") {
+        alert(`一键补全完成：处理 ${batchStatus.total} 条素材，新增 ${batchStatus.charactersAdded} 个角色，合并 ${batchStatus.charactersMerged} 个角色`)
+      } else if (batchStatus.status === "failed") {
+        alert(`补全失败：${batchStatus.errors?.join("\n") || "未知错误"}`)
+      }
+      setBatchTaskId(null)
+    }
+  }, [batchStatus])
 
   // 桥段
   const { data: tropesList } = trpc.trope.list.useQuery(
@@ -252,10 +324,7 @@ export default function LoreLibrary() {
 
   const selectedSeries = seriesList?.find(s => s.id === selectedSeriesId)
 
-  const resetCharForm = () => {
-    setCharName(""); setCharAliases(""); setCharAge(""); setCharPersonality("")
-    setCharMotivations(""); setCharSpeech(""); setCharTaboos(""); setCharArc("")
-  }
+  const resetCharForm = () => charForm.reset()
 
   const resetWorldBibleForm = () => {
     setWbGeography(worldBible?.geography || "")
@@ -279,31 +348,20 @@ export default function LoreLibrary() {
   }
 
   const handleCreateCharacter = () => {
-    if (!selectedSeriesId || !charName.trim()) return
+    if (!selectedSeriesId) return
+    const data = charForm.getValues()
+    if (!data.name.trim()) return
     createCharacter.mutate({
       seriesId: selectedSeriesId,
-      name: charName,
-      aliases: charAliases.split(",").map(s => s.trim()).filter(Boolean),
-      age: charAge || undefined,
-      personalityTraits: charPersonality.split(",").map(s => s.trim()).filter(Boolean),
-      coreMotivations: charMotivations || undefined,
-      speechPatterns: charSpeech || undefined,
-      taboos: charTaboos.split(",").map(s => s.trim()).filter(Boolean),
-      canonicalArcSummary: charArc || undefined,
+      ...formDataToCharacterPayload(data),
     })
   }
 
   const handleUpdateCharacter = (charId: number) => {
+    const data = charForm.getValues()
     updateCharacter.mutate({
       id: charId,
-      name: charName || undefined,
-      aliases: charAliases.split(",").map(s => s.trim()).filter(Boolean),
-      age: charAge || undefined,
-      personalityTraits: charPersonality.split(",").map(s => s.trim()).filter(Boolean),
-      coreMotivations: charMotivations || undefined,
-      speechPatterns: charSpeech || undefined,
-      taboos: charTaboos.split(",").map(s => s.trim()).filter(Boolean),
-      canonicalArcSummary: charArc || undefined,
+      ...formDataToCharacterPayload(data),
     })
   }
 
@@ -335,14 +393,16 @@ export default function LoreLibrary() {
 
   const openCharEdit = (char: NonNullable<typeof characters>[number]) => {
     setShowCharEdit(char.id)
-    setCharName(char.name)
-    setCharAliases((char.aliases as string[] || []).join(", "))
-    setCharAge(char.age || "")
-    setCharPersonality((char.personalityTraits as string[] || []).join(", "))
-    setCharMotivations(char.coreMotivations || "")
-    setCharSpeech(char.speechPatterns || "")
-    setCharTaboos((char.taboos as string[] || []).join(", "))
-    setCharArc(char.canonicalArcSummary || "")
+    charForm.reset({
+      name: char.name,
+      aliases: (char.aliases as string[] || []).join(", "),
+      age: char.age || "",
+      personality: (char.personalityTraits as string[] || []).join(", "),
+      motivations: char.coreMotivations || "",
+      speech: char.speechPatterns || "",
+      taboos: (char.taboos as string[] || []).join(", "),
+      arc: char.canonicalArcSummary || "",
+    })
   }
 
   return (
@@ -442,6 +502,80 @@ export default function LoreLibrary() {
                   </div>
                 </div>
 
+                {/* 完整度提示面板 */}
+                {seriesSummary && (
+                  <div className="mb-6 p-4 rounded-xl bg-white/[0.03] border border-white/10">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium">📊 「{selectedSeries?.name}」设定完整度</span>
+                      </div>
+                      {seriesSummary.materialCount > 0 && (
+                        <span className="text-xs font-mono text-white/40">
+                          素材 {seriesSummary.materialCount} 条
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-start gap-6">
+                      <div className="flex items-center gap-6 flex-wrap py-2">
+                        <div className="flex items-center gap-1.5">
+                          <Users className="w-3.5 h-3.5 text-amber-500" />
+                          <span className="text-sm"><span className="font-semibold text-amber-400">{seriesSummary.characterCount}</span> <span className="text-white/50 text-xs">角色</span></span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <Globe className="w-3.5 h-3.5 text-amber-500" />
+                          <span className="text-sm"><span className="font-semibold text-amber-400">{seriesSummary.worldBibleAspectCount}</span> <span className="text-white/50 text-xs">世界观维度</span></span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <Calendar className="w-3.5 h-3.5 text-amber-500" />
+                          <span className="text-sm"><span className="font-semibold text-amber-400">{seriesSummary.canonEventCount}</span> <span className="text-white/50 text-xs">正史</span></span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <Theater className="w-3.5 h-3.5 text-amber-500" />
+                          <span className="text-sm"><span className="font-semibold text-amber-400">{seriesSummary.tropeCount}</span> <span className="text-white/50 text-xs">桥段</span></span>
+                        </div>
+                      </div>
+                      <div className="w-48 shrink-0 -my-2">
+                        <LoreStatsChart stats={seriesSummary} />
+                      </div>
+                    </div>
+                    {/* 素材提取提示 */}
+                    {seriesSummary.materialCount > 0 && (
+                      <div className="flex items-center justify-between p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
+                        <span className="text-sm text-amber-400">
+                          该系列有 <span className="font-semibold">{seriesSummary.materialCount}</span> 条素材可提取设定
+                        </span>
+                        <button
+                          onClick={() => {
+                            if (!selectedSeriesId) return
+                            const ids = seriesMaterials?.map(m => m.id) || []
+                            if (ids.length === 0) {
+                              alert("该系列下暂无素材")
+                              return
+                            }
+                            if (confirm(`确定一键提取该系列下 ${ids.length} 条素材的设定？同名角色将自动合并。`)) {
+                              batchAutoExtractMutation.mutate({
+                                materialIds: ids,
+                                seriesId: selectedSeriesId,
+                              })
+                            }
+                          }}
+                          disabled={batchAutoExtractMutation.isPending || (batchTaskId !== null && batchStatus?.status === "running")}
+                          className="flex items-center gap-1.5 px-4 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full text-xs font-medium transition-colors"
+                        >
+                          {batchAutoExtractMutation.isPending || (batchTaskId !== null && batchStatus?.status === "running") ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Sparkles className="w-3.5 h-3.5" />
+                          )}
+                          {batchTaskId !== null && batchStatus?.status === "running"
+                            ? `提取中 ${batchStatus.processed}/${batchStatus.total}`
+                            : "一键提取全部"}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* Tabs */}
                 <div className="flex gap-1 mb-6 bg-white/5 rounded-full p-0.5 w-fit">
                   {[
@@ -515,24 +649,23 @@ export default function LoreLibrary() {
                           onClick={() => { setShowCharForm(!showCharForm); resetCharForm(); }}
                           className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors"
                         >
-                        <Plus className="w-4 h-4" />
-                        添加角色
-                      </button>
+                          <Plus className="w-4 h-4" />
+                          添加角色
+                        </button>
+                        <button
+                          onClick={() => { setShowMergeModal(true); setMergeTargetId(null); setSelectedMergeIds(new Set()); }}
+                          disabled={!characters || characters.length < 2}
+                          className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 disabled:opacity-30 rounded-full text-sm transition-colors text-white/60"
+                        >
+                          <Sparkles className="w-4 h-4" />
+                          检测重复
+                        </button>
+                      </div>
                     </div>
-                  </div>
 
                     {showCharForm && (
                       <div className="mb-6 p-5 rounded-xl bg-white/5 border border-white/10 space-y-3">
-                        <CharFormFields
-                          name={charName} setName={setCharName}
-                          aliases={charAliases} setAliases={setCharAliases}
-                          age={charAge} setAge={setCharAge}
-                          personality={charPersonality} setPersonality={setCharPersonality}
-                          motivations={charMotivations} setMotivations={setCharMotivations}
-                          speech={charSpeech} setSpeech={setCharSpeech}
-                          taboos={charTaboos} setTaboos={setCharTaboos}
-                          arc={charArc} setArc={setCharArc}
-                        />
+                        <CharFormFields control={charForm.control} />
                         <div className="flex gap-3 pt-2">
                           <button onClick={handleCreateCharacter} className="px-6 py-2 bg-amber-500 hover:bg-amber-400 text-[#111827] rounded-full font-medium text-sm">创建</button>
                           <button onClick={() => setShowCharForm(false)} className="px-6 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm">取消</button>
@@ -614,19 +747,28 @@ export default function LoreLibrary() {
                             <p className="text-white/20 text-xs mt-2 line-clamp-2">{char.canonicalArcSummary}</p>
                           )}
 
+                          {/* 风格自动提炼按钮 */}
+                          <button
+                            onClick={() => {
+                              if (selectedSeriesId) {
+                                extractStyleProfile.mutate({ seriesId: selectedSeriesId, characterName: char.name })
+                              }
+                            }}
+                            disabled={extractStyleProfile.isPending}
+                            className="mt-3 flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-white/5 hover:bg-amber-500/20 text-white/50 hover:text-amber-400 text-xs transition-colors disabled:opacity-30"
+                          >
+                            {extractStyleProfile.isPending ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Sparkles className="w-3 h-3" />
+                            )}
+                            分析风格样本
+                          </button>
+
                           {/* Edit inline form */}
                           {showCharEdit === char.id && (
                             <div className="mt-4 p-4 rounded-lg bg-white/5 border border-amber-500/20 space-y-3">
-                              <CharFormFields
-                                name={charName} setName={setCharName}
-                                aliases={charAliases} setAliases={setCharAliases}
-                                age={charAge} setAge={setCharAge}
-                                personality={charPersonality} setPersonality={setCharPersonality}
-                                motivations={charMotivations} setMotivations={setCharMotivations}
-                                speech={charSpeech} setSpeech={setCharSpeech}
-                                taboos={charTaboos} setTaboos={setCharTaboos}
-                                arc={charArc} setArc={setCharArc}
-                              />
+                              <CharFormFields control={charForm.control} />
                               <div className="flex gap-2">
                                 <button onClick={() => handleUpdateCharacter(char.id)} className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 text-[#111827] rounded-full text-xs font-medium">保存</button>
                                 <button onClick={() => setShowCharEdit(null)} className="px-4 py-1.5 bg-white/5 hover:bg-white/10 rounded-full text-xs">取消</button>
@@ -673,39 +815,51 @@ export default function LoreLibrary() {
 
                     {/* 动态维度列表 */}
                     <div className="space-y-3">
-                      {aspects.map((aspect, idx) => (
-                        <div key={aspect.id} className="p-4 rounded-xl bg-white/[0.03] border border-white/10">
-                          <div className="flex items-center gap-2 mb-2">
-                            <input
-                              value={aspect.name}
-                              onChange={e => {
+                      <SortableList
+                        items={aspects}
+                        onReorder={(ordered) => {
+                          setAspects(ordered)
+                          if (selectedSeriesId && worldBible) {
+                            reorderAspectsMutation.mutate({
+                              seriesId: selectedSeriesId,
+                              aspects: ordered,
+                            })
+                          }
+                        }}
+                        renderItem={(aspect, idx) => (
+                          <div className="p-4 rounded-xl bg-white/[0.03] border border-white/10">
+                            <div className="flex items-center gap-2 mb-2">
+                              <input
+                                value={aspect.name}
+                                onChange={e => {
+                                  const next = [...aspects]
+                                  next[idx] = { ...aspect, name: e.target.value }
+                                  setAspects(next)
+                                }}
+                                placeholder="维度名称，如：斗气体系"
+                                className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm font-medium"
+                              />
+                              <button
+                                onClick={() => setAspects(prev => prev.filter((_, i) => i !== idx))}
+                                className="p-1.5 rounded-lg hover:bg-red-500/20 text-white/30 hover:text-red-400 transition-colors"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                            <RichTextEditor
+                              value={aspect.content}
+                              onChange={(value) => {
                                 const next = [...aspects]
-                                next[idx] = { ...aspect, name: e.target.value }
+                                next[idx] = { ...aspect, content: value }
                                 setAspects(next)
                               }}
-                              placeholder="维度名称，如：斗气体系"
-                              className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm font-medium"
+                              placeholder="详细描述..."
+                              minHeight="80px"
+                              plainText
                             />
-                            <button
-                              onClick={() => setAspects(prev => prev.filter((_, i) => i !== idx))}
-                              className="p-1.5 rounded-lg hover:bg-red-500/20 text-white/30 hover:text-red-400 transition-colors"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
                           </div>
-                          <textarea
-                            value={aspect.content}
-                            onChange={e => {
-                              const next = [...aspects]
-                              next[idx] = { ...aspect, content: e.target.value }
-                              setAspects(next)
-                            }}
-                            placeholder="详细描述..."
-                            rows={3}
-                            className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none placeholder:text-white/40"
-                          />
-                        </div>
-                      ))}
+                        )}
+                      />
                       <button
                         onClick={() => setAspects(prev => [...prev, { id: `aspect_${Date.now()}_${prev.length}`, name: "", content: "" }])}
                         className="w-full py-2.5 rounded-xl border border-dashed border-white/10 hover:border-amber-500/30 text-white/40 hover:text-amber-400 transition-colors text-sm flex items-center justify-center gap-2"
@@ -801,10 +955,17 @@ export default function LoreLibrary() {
                       </div>
                     </div>
 
-                    <div className="space-y-2">
-                      {canonEvents?.map((event) => (
+                    <SortableList
+                      items={canonEvents || []}
+                      onReorder={(ordered) => {
+                        if (!selectedSeriesId) return
+                        reorderCanon.mutate({
+                          seriesId: selectedSeriesId,
+                          orderedIds: ordered.map(e => e.id),
+                        })
+                      }}
+                      renderItem={(event) => (
                         <div
-                          key={event.id}
                           className={`p-4 rounded-xl border ${event.isImmutable ? "border-amber-500/20 bg-amber-500/5" : "border-white/10 bg-white/[0.02]"} flex items-start justify-between`}
                         >
                           <div className="flex items-start gap-3">
@@ -821,8 +982,8 @@ export default function LoreLibrary() {
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
-                      ))}
-                    </div>
+                      )}
+                    />
                   </div>
                 )}
 
@@ -865,6 +1026,9 @@ export default function LoreLibrary() {
                                 {(trope.tags as string[] || []).map(tag => (
                                   <span key={tag} className="px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 text-xs font-mono">{tag}</span>
                                 ))}
+                                {((trope as unknown as { usageCount?: number }).usageCount ?? 0) > 0 && (
+                                  <span className="px-2 py-0.5 rounded-full bg-white/5 text-white/40 text-xs font-mono">使用 {(trope as unknown as { usageCount: number }).usageCount} 次</span>
+                                )}
                               </div>
                               <div className="flex items-center gap-1">
                                 <button
@@ -886,6 +1050,28 @@ export default function LoreLibrary() {
                               <div className="flex items-center gap-2 mb-2">
                                 <span className="font-mono text-xs text-amber-500/60">模式</span>
                                 <span className="text-xs text-white/50">{trope.pattern}</span>
+                              </div>
+                            )}
+                            {/* 关联角色 */}
+                            {(trope as unknown as { linkedCharacters?: Array<{ id: number; name: string; role: string | null }> }).linkedCharacters &&
+                             (trope as unknown as { linkedCharacters: Array<{ id: number; name: string; role: string | null }> }).linkedCharacters.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5 mb-2">
+                                <span className="text-[10px] font-mono text-white/30">涉及角色:</span>
+                                {(trope as unknown as { linkedCharacters: Array<{ id: number; name: string; role: string | null }> }).linkedCharacters.map(lc => (
+                                  <span key={lc.id} className="px-2 py-0.5 rounded-full bg-white/5 text-white/50 text-[10px] font-mono">
+                                    {lc.name}{lc.role ? ` · ${lc.role}` : ''}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                            {/* 来源素材 */}
+                            {(trope as unknown as { sourceChunks?: Array<{ title: string; type: string }> }).sourceChunks &&
+                             (trope as unknown as { sourceChunks: Array<{ title: string; type: string }> }).sourceChunks.length > 0 && (
+                              <div className="flex flex-wrap gap-1.5 mb-2">
+                                <span className="text-[10px] font-mono text-white/30">来源:</span>
+                                {(trope as unknown as { sourceChunks: Array<{ title: string; type: string }> }).sourceChunks.map((sc, i) => (
+                                  <span key={i} className="px-2 py-0.5 rounded-full bg-white/5 text-white/40 text-[10px] font-mono">{sc.title}</span>
+                                ))}
                               </div>
                             )}
                             {(trope.examples as string[] || []).length > 0 && (
@@ -1329,6 +1515,87 @@ export default function LoreLibrary() {
         </div>
       )}
 
+      {/* 角色合并 Modal */}
+      {showMergeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-lg p-6 rounded-2xl bg-[#1F2937] border border-white/10 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-serif text-lg font-semibold">合并重复角色</h3>
+              <button onClick={() => { setShowMergeModal(false); setMergeTargetId(null); setSelectedMergeIds(new Set()); }} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+            </div>
+            {duplicateData?.groups && duplicateData.groups.length > 0 ? (
+              <div className="space-y-4">
+                <p className="text-sm text-white/50 mb-3">发现 {duplicateData.groups.length} 组重复角色，选择保留的主角色后合并。</p>
+                {duplicateData.groups.map((group, idx) => (
+                  <div key={idx} className="p-3 rounded-xl bg-white/5 border border-white/10">
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="text-xs font-mono text-amber-500">{group.reason}</span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {group.names.map((name, i) => {
+                        const charId = group.ids[i]
+                        const isTarget = mergeTargetId === charId
+                        const isSelected = selectedMergeIds.has(charId)
+                        return (
+                          <div key={charId} className="flex items-center gap-2">
+                            <input
+                              type="radio"
+                              name={`merge-target-${idx}`}
+                              checked={isTarget}
+                              onChange={() => { setMergeTargetId(charId); setSelectedMergeIds(prev => { const next = new Set(prev); next.delete(charId); return next; }); }}
+                              className="w-4 h-4 shrink-0"
+                            />
+                            <input
+                              type="checkbox"
+                              checked={isSelected}
+                              disabled={isTarget}
+                              onChange={(e) => {
+                                const next = new Set(selectedMergeIds)
+                                if (e.target.checked) next.add(charId)
+                                else next.delete(charId)
+                                setSelectedMergeIds(next)
+                              }}
+                              className="w-4 h-4 shrink-0"
+                            />
+                            <span className={`text-sm ${isTarget ? 'text-amber-400 font-medium' : 'text-white/70'}`}>{name} {isTarget && '(保留)'}</span>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </div>
+                ))}
+                <button
+                  onClick={() => {
+                    if (!mergeTargetId || selectedMergeIds.size === 0) {
+                      alert("请选择保留的主角色和至少一个要合并的角色")
+                      return
+                    }
+                    const mergeIds = Array.from(selectedMergeIds).filter(id => id !== mergeTargetId)
+                    if (mergeIds.length === 0) {
+                      alert("至少选择一个非保留角色进行合并")
+                      return
+                    }
+                    if (confirm(`确定将 ${mergeIds.length} 个角色合并到「${characters?.find(c => c.id === mergeTargetId)?.name}」？此操作不可撤销。`)) {
+                      mergeCharacters.mutate({ keepId: mergeTargetId, mergeIds })
+                    }
+                  }}
+                  disabled={mergeCharacters.isPending}
+                  className="w-full px-5 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-[#111827] rounded-full font-medium text-sm transition-colors"
+                >
+                  {mergeCharacters.isPending ? <Loader2 className="w-4 h-4 animate-spin inline mr-2" /> : null}
+                  确认合并
+                </button>
+              </div>
+            ) : (
+              <div className="text-center py-8 text-white/40">
+                <CheckCircle className="w-10 h-10 mx-auto mb-3 opacity-40" />
+                <p className="text-sm">{duplicateData ? '未发现重复角色' : '正在检测...'}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* 桥段提取进度 Modal */}
       {showExtractProgress && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
@@ -1414,61 +1681,36 @@ export default function LoreLibrary() {
   )
 }
 
-function CharFormFields({
-  name, setName,
-  aliases, setAliases,
-  age, setAge,
-  personality, setPersonality,
-  motivations, setMotivations,
-  speech, setSpeech,
-  taboos, setTaboos,
-  arc, setArc,
-}: {
-  name: string; setName: (v: string) => void
-  aliases: string; setAliases: (v: string) => void
-  age: string; setAge: (v: string) => void
-  personality: string; setPersonality: (v: string) => void
-  motivations: string; setMotivations: (v: string) => void
-  speech: string; setSpeech: (v: string) => void
-  taboos: string; setTaboos: (v: string) => void
-  arc: string; setArc: (v: string) => void
-}) {
+function CharFormFields({ control }: { control: import("react-hook-form").Control<import("@/hooks/useCharacterForm").CharacterFormData> }) {
+  const renderField = (name: keyof import("@/hooks/useCharacterForm").CharacterFormData, label: string, placeholder?: string, multiline?: boolean) => (
+    <Controller
+      name={name}
+      control={control}
+      render={({ field }) => (
+        <div>
+          <label className="block font-mono text-xs text-white/50 mb-1">{label}</label>
+          {multiline ? (
+            <RichTextEditor value={field.value || ""} onChange={field.onChange} placeholder={placeholder} minHeight="80px" plainText />
+          ) : (
+            <input {...field} className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm" placeholder={placeholder} />
+          )}
+        </div>
+      )}
+    />
+  )
+
   return (
     <>
       <div className="grid grid-cols-2 gap-3">
-        <div>
-          <label className="block font-mono text-xs text-white/50 mb-1">角色名 *</label>
-          <input value={name} onChange={e => setName(e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm" />
-        </div>
-        <div>
-          <label className="block font-mono text-xs text-white/50 mb-1">年龄</label>
-          <input value={age} onChange={e => setAge(e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm" placeholder="如：18岁" />
-        </div>
+        {renderField("name", "角色名 *")}
+        {renderField("age", "年龄", "如：18岁")}
       </div>
-      <div>
-        <label className="block font-mono text-xs text-white/50 mb-1">别名（逗号分隔）</label>
-        <input value={aliases} onChange={e => setAliases(e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm" placeholder="如：萧炎, 炎帝" />
-      </div>
-      <div>
-        <label className="block font-mono text-xs text-white/50 mb-1">性格特征（逗号分隔）</label>
-        <input value={personality} onChange={e => setPersonality(e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm" placeholder="如：冷静, 坚毅, 重情义" />
-      </div>
-      <div>
-        <label className="block font-mono text-xs text-white/50 mb-1">核心动机</label>
-        <textarea value={motivations} onChange={e => setMotivations(e.target.value)} className="w-full h-16 px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none" placeholder="角色追求的核心目标..." />
-      </div>
-      <div>
-        <label className="block font-mono text-xs text-white/50 mb-1">语言风格</label>
-        <input value={speech} onChange={e => setSpeech(e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm" placeholder="如：豪爽直率，常用江湖切口" />
-      </div>
-      <div>
-        <label className="block font-mono text-xs text-white/50 mb-1">禁忌（逗号分隔）</label>
-        <input value={taboos} onChange={e => setTaboos(e.target.value)} className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm" placeholder="如：不谈家事, 不杀无辜" />
-      </div>
-      <div>
-        <label className="block font-mono text-xs text-white/50 mb-1">正史弧线</label>
-        <textarea value={arc} onChange={e => setArc(e.target.value)} className="w-full h-16 px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none" placeholder="角色在正史中的成长轨迹..." />
-      </div>
+      {renderField("aliases", "别名（逗号分隔）", "如：萧炎, 炎帝")}
+      {renderField("personality", "性格特征（逗号分隔）", "如：冷静, 坚毅, 重情义")}
+      {renderField("motivations", "核心动机", "角色追求的核心目标...", true)}
+      {renderField("speech", "语言风格", "如：豪爽直率，常用江湖切口")}
+      {renderField("taboos", "禁忌（逗号分隔）", "如：不谈家事, 不杀无辜")}
+      {renderField("arc", "正史弧线", "角色在正史中的成长轨迹...", true)}
     </>
   )
 }

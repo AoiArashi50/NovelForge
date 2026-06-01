@@ -1,12 +1,14 @@
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect, useCallback } from "react"
+import { useDropzone } from "react-dropzone"
 import { trpc } from "@/providers/trpc"
 import NavBar from "@/components/NavBar"
 import Select from "@/components/Select"
 import Modal from "@/components/Modal"
+import { VirtualList } from "@/components/VirtualList"
 import {
   Database, Upload, FileText, BookOpen, Lightbulb,
   Trash2, Tag, Sparkles, AlertCircle, CheckCircle, Loader2,
-  Eye, X, ArrowLeftRight, Library
+  Eye, X, ArrowLeftRight, Library, Zap
 } from "lucide-react"
 import type { ExtractedLore } from "@contracts/schemas"
 
@@ -100,6 +102,33 @@ export default function MaterialPool() {
     },
   })
 
+  const autoExtractLoreMutation = trpc.material.autoExtractLore.useMutation({
+    onSuccess: (data) => {
+      const parts: string[] = []
+      if (data.charactersAdded > 0) parts.push(`新增 ${data.charactersAdded} 个角色`)
+      if (data.charactersMerged > 0) parts.push(`合并 ${data.charactersMerged} 个角色`)
+      if (data.worldBibleCreated) parts.push("新建世界观")
+      if (data.worldBibleMerged) parts.push("合并世界观")
+      const msg = parts.length > 0 ? parts.join("，") : "未提取到新设定"
+      alert(`「${data.materialTitle}」提取完成：${msg}`)
+      utils.lore.character.list.invalidate()
+      utils.lore.worldBible.get.invalidate()
+    },
+    onError: (err) => {
+      alert(`提取失败：${err.message}`)
+    },
+  })
+
+  const batchAutoExtractMutation = trpc.material.batchAutoExtract.useMutation({
+    onSuccess: (data) => {
+      setBatchTaskId(data.taskId)
+    },
+    onError: (err) => {
+      alert(`批量提取启动失败：${err.message}`)
+      setBatchTaskId(null)
+    },
+  })
+
   const [showForm, setShowForm] = useState(false)
   const [uploadMode, setUploadMode] = useState<UploadMode>("dual")
   const [title, setTitle] = useState("")
@@ -119,6 +148,58 @@ export default function MaterialPool() {
   const [extractTargetSeriesId, setExtractTargetSeriesId] = useState<number | null>(null)
   const [selectedCharIndexes, setSelectedCharIndexes] = useState<Set<number>>(new Set())
   const [saveWorldBible, setSaveWorldBible] = useState(true)
+
+  // 一键提取系列选择弹窗
+  const [showAutoExtractModal, setShowAutoExtractModal] = useState(false)
+  const [autoExtractMaterialId, setAutoExtractMaterialId] = useState<number | null>(null)
+  const [autoExtractSeriesId, setAutoExtractSeriesId] = useState<number | null>(null)
+
+  // 批量提取系列选择弹窗
+  const [showBatchExtractModal, setShowBatchExtractModal] = useState(false)
+  const [batchExtractSeriesId, setBatchExtractSeriesId] = useState<number | null>(null)
+  const [batchTaskId, setBatchTaskId] = useState<string | null>(null)
+
+  // Single 模式拖拽上传
+  const onDropSingle = useCallback((acceptedFiles: File[]) => {
+    const file = acceptedFiles[0]
+    if (file) handleFileSelect(file, "content")
+  }, [])
+
+  const singleDropzone = useDropzone({
+    onDrop: onDropSingle,
+    accept: { 'text/plain': ['.txt'], 'application/vnd.openxmlformats-officedocument.wordprocessingml.document': ['.docx'] },
+    multiple: false,
+    noClick: true,
+  })
+
+  // 轮询批量提取进度
+  const { data: batchStatus } = trpc.material.batchAutoExtractStatus.useQuery(
+    { taskId: batchTaskId! },
+    {
+      enabled: batchTaskId !== null,
+      refetchInterval: (query) => {
+        const data = query.state.data
+        return data?.status === "running" ? 2000 : false
+      },
+    }
+  )
+
+  // 批量提取完成时自动刷新
+  useEffect(() => {
+    if (batchStatus?.status === "completed" || batchStatus?.status === "failed") {
+      utils.lore.character.list.invalidate()
+      utils.lore.worldBible.get.invalidate()
+      utils.material.list.invalidate()
+      if (batchStatus.status === "completed") {
+        alert(`批量提取完成：处理 ${batchStatus.total} 条素材，新增 ${batchStatus.charactersAdded} 个角色，合并 ${batchStatus.charactersMerged} 个角色`)
+      } else if (batchStatus.status === "failed") {
+        alert(`批量提取失败：${batchStatus.errors?.join("\n") || "未知错误"}`)
+      }
+      setBatchTaskId(null)
+      setSelectedMaterialIds([])
+      setShowBatchExtractModal(false)
+    }
+  }, [batchStatus])
 
   const { data: chunkList, isLoading: chunksLoading } = trpc.material.getChunks.useQuery(
     { materialId: detailMaterialId! },
@@ -387,12 +468,23 @@ export default function MaterialPool() {
                     }}
                   />
                 </div>
-                <textarea value={content} onChange={e => setContent(e.target.value)}
-                  placeholder={sourceType === "parallel_corpus"
-                    ? "粘贴对照内容，用 === 分隔原文和译文...\n\nHello.\n===\n你好。"
-                    : "粘贴素材内容..."
-                  }
-                  className="w-full h-48 px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none placeholder:text-white/40" />
+                <div
+                  {...singleDropzone.getRootProps()}
+                  className={`relative rounded-xl transition-colors ${singleDropzone.isDragActive ? 'ring-2 ring-amber-500 bg-amber-500/5' : ''}`}
+                >
+                  <input {...singleDropzone.getInputProps()} />
+                  {singleDropzone.isDragActive && (
+                    <div className="absolute inset-0 flex items-center justify-center rounded-xl bg-amber-500/10 z-10 pointer-events-none">
+                      <p className="text-amber-400 text-sm font-medium">松开以上传文件</p>
+                    </div>
+                  )}
+                  <textarea value={content} onChange={e => setContent(e.target.value)}
+                    placeholder={sourceType === "parallel_corpus"
+                      ? "粘贴对照内容，用 === 分隔原文和译文...\n\nHello.\n===\n你好。"
+                      : "粘贴素材内容..."
+                    }
+                    className="w-full h-48 px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none placeholder:text-white/40" />
+                </div>
               </div>
             )}
 
@@ -517,18 +609,31 @@ export default function MaterialPool() {
                 </span>
               </div>
               {selectedMaterialIds.length > 0 && (
-                <button
-                  onClick={() => {
-                    if (confirm(`确定将选中的 ${selectedMaterialIds.length} 条素材批量导入小说管理？`)) {
-                      importMaterialsMutation.mutate({ materialIds: selectedMaterialIds })
-                    }
-                  }}
-                  disabled={importMaterialsMutation.isPending}
-                  className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full text-sm font-medium transition-colors"
-                >
-                  {importMaterialsMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookOpen className="w-4 h-4" />}
-                  批量导入为小说
-                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      setBatchExtractSeriesId(null)
+                      setShowBatchExtractModal(true)
+                    }}
+                    disabled={batchAutoExtractMutation.isPending}
+                    className="flex items-center gap-2 px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 rounded-full text-sm font-medium transition-colors"
+                  >
+                    <Zap className="w-4 h-4" />
+                    批量提取设定
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (confirm(`确定将选中的 ${selectedMaterialIds.length} 条素材批量导入小说管理？`)) {
+                        importMaterialsMutation.mutate({ materialIds: selectedMaterialIds })
+                      }
+                    }}
+                    disabled={importMaterialsMutation.isPending}
+                    className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full text-sm font-medium transition-colors"
+                  >
+                    {importMaterialsMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <BookOpen className="w-4 h-4" />}
+                    批量导入为小说
+                  </button>
+                </div>
               )}
             </div>
 
@@ -610,18 +715,40 @@ export default function MaterialPool() {
                         </button>
                       )}
                       {m.status === "indexed" && (
-                        <button
-                          onClick={() => {
-                            setExtractMaterialId(m.id)
-                            setExtractTargetSeriesId(m.seriesId || null)
-                            extractLoreMutation.mutate({ materialId: m.id })
-                          }}
-                          disabled={extractLoreMutation.isPending}
-                          className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/50 hover:text-amber-400"
-                          title="提取设定"
-                        >
-                          <Library className="w-4 h-4" />
-                        </button>
+                        <>
+                          <button
+                            onClick={() => {
+                              setExtractMaterialId(m.id)
+                              setExtractTargetSeriesId(m.seriesId || null)
+                              extractLoreMutation.mutate({ materialId: m.id })
+                            }}
+                            disabled={extractLoreMutation.isPending}
+                            className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-white/50 hover:text-amber-400"
+                            title="提取设定（可编辑）"
+                          >
+                            <Library className="w-4 h-4" />
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (m.seriesId) {
+                                autoExtractLoreMutation.mutate({ materialId: m.id, seriesId: m.seriesId })
+                              } else {
+                                setAutoExtractMaterialId(m.id)
+                                setAutoExtractSeriesId(null)
+                                setShowAutoExtractModal(true)
+                              }
+                            }}
+                            disabled={autoExtractLoreMutation.isPending}
+                            className="p-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-400"
+                            title="一键提取设定（自动保存）"
+                          >
+                            {autoExtractLoreMutation.isPending && autoExtractMaterialId === m.id ? (
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                            ) : (
+                              <Zap className="w-4 h-4" />
+                            )}
+                          </button>
+                        </>
                       )}
                       <button onClick={() => { if (confirm("确认删除？")) deleteMutation.mutate({ id: m.id }); }}
                         className="p-2 rounded-lg hover:bg-red-500/20 text-white/50 hover:text-red-400" title="删除">
@@ -666,16 +793,20 @@ export default function MaterialPool() {
                   {chunksLoading ? (
                     <div className="text-center py-8"><Loader2 className="w-6 h-6 animate-spin mx-auto text-white/30" /></div>
                   ) : chunkList && chunkList.length > 0 ? (
-                    <div className="space-y-2">
-                      {chunkList.map((chunk, i) => (
-                        <div key={chunk.id} className="p-3 rounded-lg bg-white/[0.03] border border-white/10">
-                          <div className="flex items-center gap-2 mb-1">
-                            <span className="font-mono text-xs text-amber-500/60">#{i + 1}</span>
-                            <span className="text-xs text-white/30 font-mono">{chunk.sourceType}</span>
+                    <div className="h-80">
+                      <VirtualList
+                        items={chunkList}
+                        estimateSize={80}
+                        renderItem={(chunk, i) => (
+                          <div className="mb-2 p-3 rounded-lg bg-white/[0.03] border border-white/10">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="font-mono text-xs text-amber-500/60">#{i + 1}</span>
+                              <span className="text-xs text-white/30 font-mono">{chunk.sourceType}</span>
+                            </div>
+                            <p className="text-sm text-white/60 line-clamp-3">{chunk.content}</p>
                           </div>
-                          <p className="text-sm text-white/60 line-clamp-3">{chunk.content}</p>
-                        </div>
-                      ))}
+                        )}
+                      />
                     </div>
                   ) : (
                     <p className="text-sm text-white/30 text-center py-4">暂无向量化数据</p>
@@ -1033,6 +1164,129 @@ export default function MaterialPool() {
                   </div>
                 </div>
               ) : null}
+          </Modal>
+
+          {/* 一键提取 — 选择系列弹窗 */}
+          <Modal
+            open={showAutoExtractModal}
+            onClose={() => setShowAutoExtractModal(false)}
+            title="选择目标系列"
+            maxWidth="md"
+          >
+            <div className="space-y-4">
+              <p className="text-sm text-white/60">该素材未绑定系列，请选择要保存设定到的目标系列：</p>
+              <Select
+                label="目标系列"
+                value={String(autoExtractSeriesId || "")}
+                placeholder="请选择系列"
+                options={[
+                  { value: "", label: "请选择系列" },
+                  ...(seriesList?.map(s => ({ value: String(s.id), label: s.name })) || []),
+                ]}
+                onChange={v => setAutoExtractSeriesId(v ? Number(v) : null)}
+              />
+              <div className="flex justify-end gap-3 pt-2">
+                <button onClick={() => setShowAutoExtractModal(false)} className="px-6 py-2.5 bg-white/5 hover:bg-white/10 rounded-full text-sm">取消</button>
+                <button
+                  onClick={() => {
+                    if (!autoExtractSeriesId || !autoExtractMaterialId) {
+                      alert("请选择目标系列")
+                      return
+                    }
+                    autoExtractLoreMutation.mutate({
+                      materialId: autoExtractMaterialId,
+                      seriesId: autoExtractSeriesId,
+                    })
+                    setShowAutoExtractModal(false)
+                  }}
+                  disabled={autoExtractLoreMutation.isPending}
+                  className="px-6 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium text-sm"
+                >
+                  {autoExtractLoreMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin inline mr-1" /> : null}
+                  确认提取
+                </button>
+              </div>
+            </div>
+          </Modal>
+
+          {/* 批量提取 — 选择系列弹窗 */}
+          <Modal
+            open={showBatchExtractModal}
+            onClose={() => setShowBatchExtractModal(false)}
+            title="批量提取设定"
+            maxWidth="md"
+          >
+            <div className="space-y-4">
+              <p className="text-sm text-white/60">将选中的 {selectedMaterialIds.length} 条素材的设定自动提取并保存到目标系列：</p>
+              <Select
+                label="目标系列"
+                value={String(batchExtractSeriesId || "")}
+                placeholder="请选择系列"
+                options={[
+                  { value: "", label: "请选择系列" },
+                  ...(seriesList?.map(s => ({ value: String(s.id), label: s.name })) || []),
+                ]}
+                onChange={v => setBatchExtractSeriesId(v ? Number(v) : null)}
+              />
+              {batchTaskId && batchStatus?.status === "running" && (
+                <div className="space-y-2 pt-2">
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-white/60">
+                      正在处理 {batchStatus.processed}/{batchStatus.total} 条素材
+                    </span>
+                    <span className="text-amber-400">
+                      {batchStatus.currentMaterialTitle || "准备中..."}
+                    </span>
+                  </div>
+                  <div className="w-full h-1.5 bg-white/10 rounded-full overflow-hidden">
+                    <div
+                      className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                      style={{ width: `${batchStatus.total > 0 ? (batchStatus.processed / batchStatus.total) * 100 : 0}%` }}
+                    />
+                  </div>
+                  <div className="text-xs text-white/40">
+                    新增角色: {batchStatus.charactersAdded} · 合并角色: {batchStatus.charactersMerged}
+                  </div>
+                </div>
+              )}
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  onClick={() => {
+                    setShowBatchExtractModal(false)
+                    setBatchTaskId(null)
+                  }}
+                  disabled={batchTaskId !== null && batchStatus?.status === "running"}
+                  className="px-6 py-2.5 bg-white/5 hover:bg-white/10 disabled:opacity-30 rounded-full text-sm"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => {
+                    if (!batchExtractSeriesId) {
+                      alert("请选择目标系列")
+                      return
+                    }
+                    if (selectedMaterialIds.length === 0) {
+                      alert("请先选择素材")
+                      return
+                    }
+                    batchAutoExtractMutation.mutate({
+                      materialIds: selectedMaterialIds,
+                      seriesId: batchExtractSeriesId,
+                    })
+                  }}
+                  disabled={batchAutoExtractMutation.isPending || (batchTaskId !== null && batchStatus?.status === "running")}
+                  className="px-6 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium text-sm"
+                >
+                  {batchAutoExtractMutation.isPending || (batchTaskId !== null && batchStatus?.status === "running") ? (
+                    <Loader2 className="w-4 h-4 animate-spin inline mr-1" />
+                  ) : (
+                    <Zap className="w-4 h-4 inline mr-1" />
+                  )}
+                  开始批量提取
+                </button>
+              </div>
+            </div>
           </Modal>
         </div>
       </div>
