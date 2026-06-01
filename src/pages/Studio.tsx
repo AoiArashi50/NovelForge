@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useParams } from "react-router"
 import { trpc } from "@/providers/trpc"
 import NavBar from "@/components/NavBar"
@@ -711,16 +711,14 @@ export default function Studio() {
                 <BookText className="w-3.5 h-3.5" />
                 选择系列
               </label>
-              <select
-                value={selectedSeriesId || ""}
-                onChange={e => setSelectedSeriesId(Number(e.target.value) || null)}
-                className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm"
-              >
-                <option value="">选择一个系列...</option>
-                {seriesList?.map(s => (
-                  <option key={s.id} value={s.id}>{s.name}</option>
-                ))}
-              </select>
+              <CustomSelect
+                value={selectedSeriesId?.toString() || ""}
+                onChange={v => setSelectedSeriesId(Number(v) || null)}
+                options={[
+                  { value: "", label: "选择一个系列..." },
+                  ...(seriesList?.map(s => ({ value: s.id.toString(), label: s.name })) || []),
+                ]}
+              />
             </div>
 
             {/* 父小说选择 */}
@@ -729,16 +727,14 @@ export default function Studio() {
                 <BookOpen className="w-3.5 h-3.5" />
                 关联原作（可选）
               </label>
-              <select
-                value={selectedParentNovelId || ""}
-                onChange={e => setSelectedParentNovelId(Number(e.target.value) || null)}
-                className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm"
-              >
-                <option value="">不关联原作</option>
-                {novelList?.map(n => (
-                  <option key={n.id} value={n.id}>{n.title}</option>
-                ))}
-              </select>
+              <CustomSelect
+                value={selectedParentNovelId?.toString() || ""}
+                onChange={v => setSelectedParentNovelId(Number(v) || null)}
+                options={[
+                  { value: "", label: "不关联原作" },
+                  ...(novelList?.map(n => ({ value: n.id.toString(), label: n.title })) || []),
+                ]}
+              />
             </div>
 
             {/* 创作模式 */}
@@ -1176,41 +1172,45 @@ export default function Studio() {
       {/* RAG 调用信息面板 */}
       {showRagPanel && ragCalls && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-2xl max-h-[80vh] overflow-y-auto p-6 rounded-2xl bg-[#1F2937] border border-white/10">
-            <div className="flex items-center justify-between mb-4">
+          <div className="w-full max-w-2xl max-h-[80vh] flex flex-col rounded-2xl bg-[#1F2937] border border-white/10">
+            {/* 头部 — 固定不滚动 */}
+            <div className="flex items-center justify-between px-6 pt-6 pb-4 shrink-0">
               <div className="flex items-center gap-2">
                 <Database className="w-5 h-5 text-amber-500" />
                 <h3 className="font-serif text-lg font-semibold">RAG 检索详情</h3>
               </div>
-              <button onClick={() => setShowRagPanel(false)} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+              <button onClick={() => setShowRagPanel(false)} className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"><X className="w-4 h-4" /></button>
             </div>
-            <p className="text-white/70 text-sm mb-4 font-mono">本次创作共检索到 {ragCalls.length} 条参考</p>
-            <div className="space-y-3">
-              {ragCalls.map((call, i) => (
-                <div key={i} className="p-3 rounded-xl bg-white/5 border border-white/10">
-                  <div className="flex items-center gap-2 mb-1 flex-wrap">
-                    <span className={
-                      call.type === "novel_style" ? "text-amber-400 text-xs font-mono" :
-                      call.type === "material" ? "text-green-400 text-xs font-mono" :
-                      "text-blue-400 text-xs font-mono"
-                    }>
-                      {call.type === "novel_style" ? "原作风格" :
-                       call.type === "material" ? "投喂素材" : "关键词检索"}
-                    </span>
-                    {call.score !== undefined && (
-                      <span className="text-white/40 text-xs font-mono">相似度: {(call.score * 100).toFixed(1)}%</span>
-                    )}
-                    {call.sourceTitle && (
-                      <span className="text-white/60 text-xs font-mono ml-auto">
-                        📎 {call.sourceTitle}
-                        {call.chapterNumber !== undefined ? ` · 第${call.chapterNumber}章` : ""}
-                        {call.chunkIndex !== undefined && call.totalChunks !== undefined ? ` · 片段 ${call.chunkIndex + 1}/${call.totalChunks}` : ""}
+            {/* 内容 — 可滚动 */}
+            <div className="flex-1 overflow-y-auto px-6 pb-6">
+              <p className="text-white/70 text-sm mb-4 font-mono">本次创作共检索到 {ragCalls.length} 条参考</p>
+              <div className="space-y-3">
+                {ragCalls.map((call, i) => (
+                  <div key={i} className="p-3 rounded-xl bg-white/5 border border-white/10">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
+                      <span className={
+                        call.type === "novel_style" ? "text-amber-400 text-xs font-mono" :
+                        call.type === "material" ? "text-green-400 text-xs font-mono" :
+                        "text-blue-400 text-xs font-mono"
+                      }>
+                        {call.type === "novel_style" ? "原作风格" :
+                         call.type === "material" ? "投喂素材" : "关键词检索"}
                       </span>
-                    )}
+                      {call.score !== undefined && (
+                        <span className="text-white/40 text-xs font-mono">相似度: {(call.score * 100).toFixed(1)}%</span>
+                      )}
+                      {call.sourceTitle && (
+                        <span className="text-white/60 text-xs font-mono ml-auto">
+                          📎 {call.sourceTitle}
+                          {call.chapterNumber !== undefined ? ` · 第${call.chapterNumber}章` : ""}
+                          {call.chunkIndex !== undefined && call.totalChunks !== undefined ? ` · 片段 ${call.chunkIndex + 1}/${call.totalChunks}` : ""}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-white/80 text-sm line-clamp-4">{call.content}</p>
                   </div>
-                  <p className="text-white/80 text-sm line-clamp-4">{call.content}</p>
-                </div>
-              ))}
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -1219,45 +1219,48 @@ export default function Studio() {
       {/* 保存为风格样本对话框 */}
       {showStyleSampleModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-md p-6 rounded-2xl bg-[#1F2937] border border-white/10">
-            <div className="flex items-center justify-between mb-4">
+          <div className="w-full max-w-md max-h-[80vh] flex flex-col rounded-2xl bg-[#1F2937] border border-white/10">
+            {/* 头部 — 固定不滚动 */}
+            <div className="flex items-center justify-between px-6 pt-6 pb-4 shrink-0">
               <h3 className="font-serif text-lg font-semibold">保存为风格样本</h3>
-              <button onClick={() => setShowStyleSampleModal(false)} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+              <button onClick={() => setShowStyleSampleModal(false)} className="p-1.5 rounded-lg hover:bg-white/10 transition-colors"><X className="w-4 h-4" /></button>
             </div>
-            <p className="text-white/60 text-sm mb-4">将本次生成内容保存到素材池，作为风格样本反哺后续生成。</p>
-            <div className="space-y-3 mb-4">
-              <div>
-                <label className="block text-xs text-white/50 font-mono mb-1">角色标签（可选）</label>
-                <select
-                  value={styleSampleCharacterTag}
-                  onChange={e => setStyleSampleCharacterTag(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-[#FDFBF5] text-sm outline-none focus:border-amber-500"
-                >
-                  <option value="">通用</option>
-                  {characters?.map(c => (
-                    <option key={c.id} value={c.name}>{c.name}</option>
-                  ))}
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs text-white/50 font-mono mb-1">场景标签（可选）</label>
-                <select
-                  value={styleSampleSceneTag}
-                  onChange={e => setStyleSampleSceneTag(e.target.value)}
-                  className="w-full px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-[#FDFBF5] text-sm outline-none focus:border-amber-500"
-                >
-                  <option value="">通用</option>
-                  <option value="战斗描写">战斗描写</option>
-                  <option value="对话">对话</option>
-                  <option value="心理活动">心理活动</option>
-                  <option value="环境描写">环境描写</option>
-                </select>
+            {/* 内容 — 可滚动 */}
+            <div className="flex-1 overflow-y-auto px-6">
+              <p className="text-white/60 text-sm mb-4">将本次生成内容保存到素材池，作为风格样本反哺后续生成。</p>
+              <div className="space-y-3 mb-4">
+                <div>
+                  <label className="block text-xs text-white/50 font-mono mb-1">角色标签（可选）</label>
+                  <CustomSelect
+                    value={styleSampleCharacterTag}
+                    onChange={setStyleSampleCharacterTag}
+                    options={[
+                      { value: "", label: "通用" },
+                      ...(characters?.map(c => ({ value: c.name, label: c.name })) || []),
+                    ]}
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs text-white/50 font-mono mb-1">场景标签（可选）</label>
+                  <CustomSelect
+                    value={styleSampleSceneTag}
+                    onChange={setStyleSampleSceneTag}
+                    options={[
+                      { value: "", label: "通用" },
+                      { value: "战斗描写", label: "战斗描写" },
+                      { value: "对话", label: "对话" },
+                      { value: "心理活动", label: "心理活动" },
+                      { value: "环境描写", label: "环境描写" },
+                    ]}
+                  />
+                </div>
               </div>
             </div>
-            <div className="flex justify-end gap-3">
+            {/* 底部按钮 — 固定不滚动 */}
+            <div className="flex justify-end gap-3 px-6 pt-4 pb-6 shrink-0">
               <button
                 onClick={() => setShowStyleSampleModal(false)}
-                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 text-sm"
+                className="px-4 py-2 rounded-full bg-white/5 hover:bg-white/10 text-sm transition-colors"
               >取消</button>
               <button
                 onClick={() => {
@@ -1271,12 +1274,79 @@ export default function Studio() {
                   })
                 }}
                 disabled={saveAsStyleSampleMutation.isPending}
-                className="px-4 py-2 rounded-full bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] text-sm font-medium"
+                className="px-4 py-2 rounded-full bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] text-sm font-medium transition-colors"
               >
                 {saveAsStyleSampleMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : "确认保存"}
               </button>
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 自定义下拉栏组件（替代原生 select，解决暗色主题下 option 不可见问题）
+function CustomSelect({
+  value,
+  onChange,
+  options,
+}: {
+  value: string
+  onChange: (value: string) => void
+  options: { value: string; label: string }[]
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+  const selectedLabel = options.find(o => o.value === value)?.label || options[0]?.label || ""
+
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) {
+        setOpen(false)
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside)
+    return () => document.removeEventListener("mousedown", handleClickOutside)
+  }, [])
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        className="w-full px-4 py-2.5 rounded-xl bg-white/5 border border-white/10 hover:border-white/20 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm text-left flex items-center justify-between transition-colors"
+      >
+        <span className={value ? "" : "text-white/40"}>{selectedLabel}</span>
+        <svg
+          className={`w-4 h-4 text-white/40 transition-transform ${open ? "rotate-180" : ""}`}
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute z-50 w-full mt-1.5 rounded-xl bg-[#1F2937] border border-white/10 shadow-xl overflow-hidden max-h-60 overflow-y-auto">
+          {options.map(opt => (
+            <button
+              key={opt.value}
+              type="button"
+              onClick={() => {
+                onChange(opt.value)
+                setOpen(false)
+              }}
+              className={`w-full px-4 py-2 text-sm text-left transition-colors ${
+                opt.value === value
+                  ? "bg-amber-500/10 text-amber-400"
+                  : "text-white/70 hover:bg-white/5 hover:text-white/90"
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
       )}
     </div>
