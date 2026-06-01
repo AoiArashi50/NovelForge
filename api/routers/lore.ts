@@ -1,8 +1,8 @@
 import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
-import { series, characterCards, worldBibles, seriesCanon, materials } from "@db/schema"
-import { eq, asc, inArray } from "drizzle-orm"
+import { series, characterCards, worldBibles, seriesCanon, materials, plotTropes } from "@db/schema"
+import { eq, asc, inArray, sql, and } from "drizzle-orm"
 import { chatCompletion } from "../services/deepseek"
 
 export const loreRouter = createRouter({
@@ -45,6 +45,46 @@ export const loreRouter = createRouter({
         const db = getDb()
         await db.delete(series).where(eq(series.id, input.id))
         return { success: true }
+      }),
+
+    summary: publicQuery
+      .input(z.object({ seriesId: z.number() }))
+      .query(async ({ input }) => {
+        const db = getDb()
+
+        const charRows = await db
+          .select({ count: sql<number>`count(*)` })
+          .from(characterCards)
+          .where(eq(characterCards.seriesId, input.seriesId))
+
+        const [wb] = await db
+          .select()
+          .from(worldBibles)
+          .where(eq(worldBibles.seriesId, input.seriesId))
+        const wbAspectCount = ((wb?.aspects || []) as Array<unknown>).length
+
+        const canonRows = await db
+          .select({ count: sql<number>`count(*)` })
+          .from(seriesCanon)
+          .where(eq(seriesCanon.seriesId, input.seriesId))
+
+        const tropeRows = await db
+          .select({ count: sql<number>`count(*)` })
+          .from(plotTropes)
+          .where(eq(plotTropes.seriesId, input.seriesId))
+
+        const materialRows = await db
+          .select({ count: sql<number>`count(*)` })
+          .from(materials)
+          .where(eq(materials.seriesId, input.seriesId))
+
+        return {
+          characterCount: Number(charRows[0]?.count ?? 0),
+          worldBibleAspectCount: wbAspectCount,
+          canonEventCount: Number(canonRows[0]?.count ?? 0),
+          tropeCount: Number(tropeRows[0]?.count ?? 0),
+          materialCount: Number(materialRows[0]?.count ?? 0),
+        }
       }),
   }),
 
@@ -112,6 +152,179 @@ export const loreRouter = createRouter({
         await db.delete(characterCards).where(eq(characterCards.id, input.id))
         return { success: true }
       }),
+
+    // 风格自动提炼：从该角色的风格样本中提炼语言风格画像
+    extractStyleProfile: publicQuery
+      .input(z.object({
+        seriesId: z.number(),
+        characterName: z.string(),
+      }))
+      .mutation(async ({ input }) => {
+        const db = getDb()
+
+        // 1. 获取该角色的所有风格样本
+        const styleSamples = await db
+          .select()
+          .from(materials)
+          .where(
+            and(
+              eq(materials.seriesId, input.seriesId),
+              eq(materials.sourceType, "style_sample"),
+              sql`${materials.tags}::jsonb @> ${JSON.stringify([input.characterName])}::jsonb`
+            )
+          )
+
+        if (styleSamples.length < 3) {
+          throw new Error(`风格样本不足（当前 ${styleSamples.length} 条，需要至少 3 条）。请在 Studio 中生成内容并保存为该角色的风格样本。`)
+        }
+
+        // 2. 用 AI 提炼风格特征
+        const combined = styleSamples.map(s => s.content.slice(0, 300)).join("\n---\n")
+        const prompt = `分析以下 "${input.characterName}" 的风格样本，提炼其语言风格特征：
+
+${combined}
+
+请返回以下 JSON 格式（不要包含 markdown 代码块标记，只返回纯 JSON）：
+{
+  "vocabulary": ["高频用词1", "高频用词2"],
+  "sentencePatterns": ["句式特点1"],
+  "emotionalTone": "情感基调描述",
+  "dialogueStyle": "对话风格描述",
+  "narrativeHabits": "叙事习惯描述"
+}`
+
+        const response = await chatCompletion({
+          messages: [{ role: "user", content: prompt }],
+          temperature: 0.3,
+          maxTokens: 2000,
+        })
+
+        // 3. 解析并更新角色卡
+        let profile: Record<string, unknown>
+        try {
+          // 尝试提取 JSON（AI 可能包裹在 markdown 代码块中）
+          const jsonMatch = response.match(/\{[\s\S]*\}/)
+          profile = JSON.parse(jsonMatch ? jsonMatch[0] : response)
+        } catch {
+          throw new Error("AI 返回的风格分析无法解析为有效 JSON")
+        }
+
+        // 找到该角色
+        const chars = await db
+          .select()
+          .from(characterCards)
+          .where(and(eq(characterCards.seriesId, input.seriesId), eq(characterCards.name, input.characterName)))
+
+        if (chars.length === 0) throw new Error("角色不存在")
+
+        await db.update(characterCards)
+          .set({ speechPatterns: JSON.stringify(profile) })
+          .where(eq(characterCards.id, chars[0].id))
+
+        return profile
+      }),
+
+    // 检测系列中的重复角色（同名或别名重叠）
+    findDuplicates: publicQuery
+      .input(z.object({ seriesId: z.number() }))
+      .query(async ({ input }) => {
+        const db = getDb()
+        const chars = await db
+          .select()
+          .from(characterCards)
+          .where(eq(characterCards.seriesId, input.seriesId))
+
+        const groups: Array<{ ids: number[]; names: string[]; reason: string }> = []
+        const processed = new Set<number>()
+
+        for (let i = 0; i < chars.length; i++) {
+          if (processed.has(chars[i].id)) continue
+          const group = [chars[i]]
+          const iNames = new Set([chars[i].name, ...(chars[i].aliases as string[] || [])].map(n => String(n).trim()).filter(n => n.length > 0))
+          if (iNames.size === 0) continue
+
+          for (let j = i + 1; j < chars.length; j++) {
+            if (processed.has(chars[j].id)) continue
+            const jNames = new Set([chars[j].name, ...(chars[j].aliases as string[] || [])].map(n => String(n).trim()).filter(n => n.length > 0))
+            let overlap = false
+            for (const name of iNames) {
+              if (jNames.has(name)) { overlap = true; break }
+            }
+            if (overlap) group.push(chars[j])
+          }
+
+          if (group.length > 1) {
+            const allNames = [...new Set(group.flatMap(c => [c.name, ...(c.aliases as string[] || [])]))].map(n => String(n).trim()).filter(n => n.length > 0)
+            const reason = group.some(c => c.name === group[0].name)
+              ? `同名「${group[0].name}」`
+              : `别名重叠「${allNames.join(", ")}」`
+            groups.push({
+              ids: group.map(c => c.id),
+              names: group.map(c => c.name),
+              reason,
+            })
+            group.forEach(c => processed.add(c.id))
+          }
+        }
+
+        return { groups, totalCharacters: chars.length }
+      }),
+
+    // 合并多个重复角色到保留的角色
+    merge: publicQuery
+      .input(z.object({
+        keepId: z.number(),
+        mergeIds: z.array(z.number()).min(1),
+      }))
+      .mutation(async ({ input }) => {
+        const db = getDb()
+
+        const [keep] = await db.select().from(characterCards).where(eq(characterCards.id, input.keepId))
+        if (!keep) throw new Error("保留的角色不存在")
+
+        const victims = await db
+          .select()
+          .from(characterCards)
+          .where(sql`${characterCards.id} IN (${input.mergeIds.join(",")})`)
+
+        if (victims.length === 0) throw new Error("没有可合并的角色")
+
+        const mergedAliases = new Set([keep.name, ...(keep.aliases as string[] || []), ...(victims.flatMap(v => [v.name, ...(v.aliases as string[] || [])]))].filter(Boolean).map(n => String(n).trim()))
+        mergedAliases.delete(keep.name)
+
+        const mergedTraits = [...new Set([...(keep.personalityTraits as string[] || []), ...victims.flatMap(v => v.personalityTraits as string[] || [])])]
+        const mergedTaboos = [...new Set([...(keep.taboos as string[] || []), ...victims.flatMap(v => v.taboos as string[] || [])])]
+        const mergedAppearance = [...new Set([...(keep.appearanceTags as string[] || []), ...victims.flatMap(v => v.appearanceTags as string[] || [])])]
+
+        const mergedRelationships: Record<string, unknown> = { ...(keep.relationships as Record<string, unknown> || {}) }
+        for (const v of victims) {
+          Object.assign(mergedRelationships, v.relationships as Record<string, unknown> || {})
+        }
+
+        await db.update(characterCards)
+          .set({
+            aliases: [...mergedAliases] as unknown as Record<string, unknown>[],
+            personalityTraits: mergedTraits as unknown as Record<string, unknown>[],
+            taboos: mergedTaboos as unknown as Record<string, unknown>[],
+            appearanceTags: mergedAppearance as unknown as Record<string, unknown>[],
+            relationships: mergedRelationships as unknown as Record<string, unknown>,
+            age: keep.age || victims.find(v => v.age)?.age || null,
+            coreMotivations: keep.coreMotivations || victims.find(v => v.coreMotivations)?.coreMotivations || null,
+            speechPatterns: keep.speechPatterns || victims.find(v => v.speechPatterns)?.speechPatterns || null,
+            canonicalArcSummary: keep.canonicalArcSummary || victims.find(v => v.canonicalArcSummary)?.canonicalArcSummary || null,
+            updatedAt: new Date(),
+          })
+          .where(eq(characterCards.id, keep.id))
+
+        await db.delete(characterCards).where(sql`${characterCards.id} IN (${input.mergeIds.join(",")})`)
+
+        return {
+          keepId: keep.id,
+          keepName: keep.name,
+          mergedCount: victims.length,
+          mergedAliases: [...mergedAliases],
+        }
+      }),
   }),
 
   // World Bible
@@ -166,6 +379,30 @@ export const loreRouter = createRouter({
             .returning()
           return wb
         }
+      }),
+
+      reorderAspects: publicQuery
+      .input(z.object({
+        seriesId: z.number(),
+        aspects: z.array(z.object({
+          id: z.string(),
+          name: z.string(),
+          content: z.string(),
+        })),
+      }))
+      .mutation(async ({ input }) => {
+        const db = getDb()
+        const [existing] = await db
+          .select()
+          .from(worldBibles)
+          .where(eq(worldBibles.seriesId, input.seriesId))
+        if (!existing) throw new Error("世界观不存在")
+        const [wb] = await db
+          .update(worldBibles)
+          .set({ aspects: input.aspects as unknown as Record<string, unknown>[] })
+          .where(eq(worldBibles.id, existing.id))
+          .returning()
+        return wb
       }),
 
     // 从素材中提取世界观
@@ -417,6 +654,22 @@ ${characterDescriptions}
       .mutation(async ({ input }) => {
         const db = getDb()
         await db.delete(seriesCanon).where(eq(seriesCanon.id, input.id))
+        return { success: true }
+      }),
+
+    reorder: publicQuery
+      .input(z.object({
+        seriesId: z.number(),
+        orderedIds: z.array(z.number()),
+      }))
+      .mutation(async ({ input }) => {
+        const db = getDb()
+        for (let i = 0; i < input.orderedIds.length; i++) {
+          await db
+            .update(seriesCanon)
+            .set({ eventOrder: i + 1 })
+            .where(eq(seriesCanon.id, input.orderedIds[i]))
+        }
         return { success: true }
       }),
   }),

@@ -1,24 +1,285 @@
 import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
-import { materials, translationMemory, vectorChunks } from "@db/schema"
+import { materials, translationMemory, vectorChunks, characterCards, worldBibles } from "@db/schema"
 import { eq, desc, sql, and } from "drizzle-orm"
+import { tryFixTruncatedJson } from "../lib/json-utils"
+
+// ========== 批量提取异步任务状态（内存队列，单用户场景）==========
+
+type BatchTaskStatus = "running" | "completed" | "failed"
+
+interface BatchTask {
+  id: string
+  status: BatchTaskStatus
+  total: number
+  processed: number
+  currentMaterialId: number | null
+  currentMaterialTitle: string
+  charactersAdded: number
+  charactersMerged: number
+  errors: string[]
+  startedAt: Date
+  completedAt: Date | null
+}
+
+const batchTasks = new Map<string, BatchTask>()
+
+function generateTaskId(): string {
+  return `batch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+}
+
+function cleanupOldTasks(maxAgeMs = 1000 * 60 * 60 * 2): void {
+  const cutoff = Date.now() - maxAgeMs
+  for (const [id, task] of batchTasks) {
+    if (task.startedAt.getTime() < cutoff) {
+      batchTasks.delete(id)
+    }
+  }
+}
+
+// ========== 内部辅助：一键提取核心逻辑 ==========
+
+async function runAutoExtractLore(
+  materialId: number,
+  targetSeriesId: number
+): Promise<{
+  charactersAdded: number
+  charactersMerged: number
+  worldBibleCreated: boolean
+  worldBibleMerged: boolean
+  materialTitle: string
+}> {
+  const db = getDb()
+
+  const [material] = await db
+    .select()
+    .from(materials)
+    .where(eq(materials.id, materialId))
+
+  if (!material) throw new Error("素材不存在")
+  if (!material.content) throw new Error("素材内容为空")
+
+  // AI 提取
+  const content = material.content.slice(0, 8000)
+  const systemPrompt = `你是一个专业的小说设定提取助手。你的任务是从小说或设定素材中提取结构化的角色信息和世界观设定。
+
+提取要求：
+1. 只提取素材中**明确提到**的信息，不要编造
+2. 如果某类信息在素材中没有出现，返回空值或空数组
+3. 人际关系用 {"角色名": "关系描述"} 的格式
+4. 派系用 {"name": "名称", "description": "描述"} 的格式
+5. 时间线事件按发生顺序排列，order 从 1 开始
+
+必须返回严格的 JSON 格式，不要包含 markdown 代码块标记。`
+
+  const userPrompt = `请从以下素材中提取角色卡和世界观设定，返回 JSON：
+
+{
+  "characters": [
+    {
+      "name": "角色名",
+      "aliases": ["别名1", "别名2"],
+      "age": "年龄描述",
+      "appearanceTags": ["外貌标签1", "外貌标签2"],
+      "personalityTraits": ["性格1", "性格2"],
+      "coreMotivations": "核心动机/目标",
+      "relationships": {"其他角色名": "关系描述"},
+      "speechPatterns": "说话方式/口头禅",
+      "taboos": ["禁忌1", "禁忌2"],
+      "canonicalArcSummary": "角色故事线概要"
+    }
+  ],
+  "worldBible": {
+    "geography": "地理环境",
+    "magicSystem": "魔法/超自然系统",
+    "technologyLevel": "科技水平",
+    "factions": [{"name": "派系名", "description": "描述"}],
+    "timelineEvents": [{"order": 1, "description": "事件描述"}],
+    "culturalCustoms": "文化习俗",
+    "linguisticNotes": "语言/命名规则"
+  }
+}
+
+素材内容：
+${content}`
+
+  const response = await chatCompletion({
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: userPrompt },
+    ],
+    temperature: 0.3,
+    maxTokens: 8000,
+  })
+
+  let parsed: unknown
+  const fixedJson = tryFixTruncatedJson(response)
+  if (fixedJson) {
+    parsed = JSON.parse(fixedJson)
+  } else {
+    console.error("[autoExtractLore] JSON 修复失败，原始响应前2000字符:", response.slice(0, 2000))
+    throw new Error("AI 返回的内容无法解析为有效 JSON")
+  }
+
+  const validated = extractedLoreSchema.parse(parsed)
+
+  // 导入角色（同名或别名重叠自动合并）
+  let charactersAdded = 0
+  let charactersMerged = 0
+
+  // 预加载系列下所有角色，用于别名匹配
+  const seriesCharacters = await db
+    .select()
+    .from(characterCards)
+    .where(eq(characterCards.seriesId, targetSeriesId))
+
+  for (const char of validated.characters) {
+    const extractedNames = new Set([char.name, ...(char.aliases || [])].filter(Boolean).map(n => n.trim()))
+
+    // 查找同名或别名重叠的现有角色
+    const matched = seriesCharacters.find(old => {
+      const oldNames = new Set([old.name, ...(old.aliases as string[] || [])].filter(Boolean).map(n => n.trim()))
+      for (const name of extractedNames) {
+        if (oldNames.has(name)) return true
+      }
+      return false
+    })
+
+    if (matched) {
+      const old = matched
+      const mergedAliases = [...new Set([...(old.aliases as string[] || []), ...(char.aliases || [])])]
+      const mergedTraits = [...new Set([...(old.personalityTraits as string[] || []), ...(char.personalityTraits || [])])]
+      const mergedTaboos = [...new Set([...(old.taboos as string[] || []), ...(char.taboos || [])])]
+      const mergedRelationships = { ...(old.relationships as Record<string, unknown> || {}), ...(char.relationships || {}) }
+
+      await db
+        .update(characterCards)
+        .set({
+          aliases: mergedAliases as unknown as Record<string, unknown>[],
+          personalityTraits: mergedTraits as unknown as Record<string, unknown>[],
+          taboos: mergedTaboos as unknown as Record<string, unknown>[],
+          relationships: mergedRelationships as unknown as Record<string, unknown>,
+          age: old.age || char.age || null,
+          coreMotivations: old.coreMotivations || char.coreMotivations || null,
+          speechPatterns: old.speechPatterns || char.speechPatterns || null,
+          canonicalArcSummary: old.canonicalArcSummary || char.canonicalArcSummary || null,
+          appearanceTags: [...new Set([...(old.appearanceTags as string[] || []), ...(char.appearanceTags || [])])] as unknown as Record<string, unknown>[],
+          updatedAt: new Date(),
+        })
+        .where(eq(characterCards.id, old.id))
+
+      // 更新内存缓存，避免后续重复匹配
+      const idx = seriesCharacters.findIndex(c => c.id === old.id)
+      if (idx !== -1) {
+        seriesCharacters[idx] = {
+          ...old,
+          aliases: mergedAliases as unknown as Record<string, unknown>[],
+          personalityTraits: mergedTraits as unknown as Record<string, unknown>[],
+          taboos: mergedTaboos as unknown as Record<string, unknown>[],
+          relationships: mergedRelationships as unknown as Record<string, unknown>,
+          age: old.age || char.age || null,
+          coreMotivations: old.coreMotivations || char.coreMotivations || null,
+          speechPatterns: old.speechPatterns || char.speechPatterns || null,
+          canonicalArcSummary: old.canonicalArcSummary || char.canonicalArcSummary || null,
+          appearanceTags: [...new Set([...(old.appearanceTags as string[] || []), ...(char.appearanceTags || [])])] as unknown as Record<string, unknown>[],
+          updatedAt: new Date(),
+        }
+      }
+      charactersMerged++
+    } else {
+      const [inserted] = await db.insert(characterCards).values({
+        seriesId: targetSeriesId,
+        name: char.name,
+        aliases: char.aliases as unknown as Record<string, unknown>[],
+        age: char.age || null,
+        appearanceTags: char.appearanceTags as unknown as Record<string, unknown>[],
+        personalityTraits: char.personalityTraits as unknown as Record<string, unknown>[],
+        coreMotivations: char.coreMotivations || null,
+        relationships: (char.relationships || {}) as unknown as Record<string, unknown>,
+        speechPatterns: char.speechPatterns || null,
+        taboos: char.taboos as unknown as Record<string, unknown>[],
+        canonicalArcSummary: char.canonicalArcSummary || null,
+      }).returning()
+      if (inserted) seriesCharacters.push(inserted)
+      charactersAdded++
+    }
+  }
+
+  // 导入世界观（自动合并）
+  let worldBibleCreated = false
+  let worldBibleMerged = false
+  const wb = validated.worldBible
+  if (wb && (wb.geography || wb.magicSystem || wb.technologyLevel || wb.factions?.length || wb.timelineEvents?.length || wb.culturalCustoms || wb.linguisticNotes)) {
+    const [existingWb] = await db
+      .select()
+      .from(worldBibles)
+      .where(eq(worldBibles.seriesId, targetSeriesId))
+
+    if (existingWb) {
+      const existingAspects = (existingWb.aspects || []) as Array<{ id: string; name: string; content: string }>
+      const newAspects: Array<{ id: string; name: string; content: string }> = []
+      if (wb.geography && !existingWb.geography) newAspects.push({ id: `asp_geo_${Date.now()}`, name: "地理环境", content: wb.geography })
+      if (wb.magicSystem && !existingWb.magicSystem) newAspects.push({ id: `asp_mag_${Date.now()}`, name: "力量体系", content: wb.magicSystem })
+      if (wb.technologyLevel && !existingWb.technologyLevel) newAspects.push({ id: `asp_tech_${Date.now()}`, name: "科技水平", content: wb.technologyLevel })
+      if (wb.culturalCustoms && !existingWb.culturalCustoms) newAspects.push({ id: `asp_cul_${Date.now()}`, name: "文化习俗", content: wb.culturalCustoms })
+      if (wb.linguisticNotes && !existingWb.linguisticNotes) newAspects.push({ id: `asp_ling_${Date.now()}`, name: "语言命名", content: wb.linguisticNotes })
+
+      const mergedAspects = [...existingAspects, ...newAspects]
+      const mergedFactions = [...((existingWb.factions as Array<{ name: string; description: string }>) || []), ...(wb.factions || [])]
+      const mergedTimeline = [...((existingWb.timelineEvents as Array<{ order: number; description: string }>) || []), ...(wb.timelineEvents || [])]
+
+      await db
+        .update(worldBibles)
+        .set({
+          geography: existingWb.geography || wb.geography || null,
+          magicSystem: existingWb.magicSystem || wb.magicSystem || null,
+          technologyLevel: existingWb.technologyLevel || wb.technologyLevel || null,
+          culturalCustoms: existingWb.culturalCustoms || wb.culturalCustoms || null,
+          linguisticNotes: existingWb.linguisticNotes || wb.linguisticNotes || null,
+          factions: mergedFactions as unknown as Record<string, unknown>[],
+          timelineEvents: mergedTimeline as unknown as Record<string, unknown>[],
+          aspects: mergedAspects as unknown as Record<string, unknown>[],
+          updatedAt: new Date(),
+        })
+        .where(eq(worldBibles.id, existingWb.id))
+      worldBibleMerged = true
+    } else {
+      const aspects: Array<{ id: string; name: string; content: string }> = []
+      if (wb.geography) aspects.push({ id: `asp_geo_${Date.now()}`, name: "地理环境", content: wb.geography })
+      if (wb.magicSystem) aspects.push({ id: `asp_mag_${Date.now()}`, name: "力量体系", content: wb.magicSystem })
+      if (wb.technologyLevel) aspects.push({ id: `asp_tech_${Date.now()}`, name: "科技水平", content: wb.technologyLevel })
+      if (wb.culturalCustoms) aspects.push({ id: `asp_cul_${Date.now()}`, name: "文化习俗", content: wb.culturalCustoms })
+      if (wb.linguisticNotes) aspects.push({ id: `asp_ling_${Date.now()}`, name: "语言命名", content: wb.linguisticNotes })
+
+      await db.insert(worldBibles).values({
+        seriesId: targetSeriesId,
+        geography: wb.geography || null,
+        magicSystem: wb.magicSystem || null,
+        technologyLevel: wb.technologyLevel || null,
+        culturalCustoms: wb.culturalCustoms || null,
+        linguisticNotes: wb.linguisticNotes || null,
+        factions: (wb.factions || []) as unknown as Record<string, unknown>[],
+        timelineEvents: (wb.timelineEvents || []) as unknown as Record<string, unknown>[],
+        aspects: aspects as unknown as Record<string, unknown>[],
+      })
+      worldBibleCreated = true
+    }
+  }
+
+  return {
+    charactersAdded,
+    charactersMerged,
+    worldBibleCreated,
+    worldBibleMerged,
+    materialTitle: material.title,
+  }
+}
 import { getEmbedding, chatCompletion } from "../services/deepseek"
 import { parseParallelCorpus } from "../services/parser"
 import { extractedLoreSchema } from "@contracts/schemas"
-
-// 文本分段
-function splitIntoChunks(text: string, chunkSize: number = 500, overlap: number = 100): string[] {
-  const chunks: string[] = []
-  let start = 0
-  while (start < text.length) {
-    const end = Math.min(start + chunkSize, text.length)
-    chunks.push(text.slice(start, end))
-    start += chunkSize - overlap
-    if (start >= end) break
-  }
-  return chunks
-}
+import { indexNovel } from "../services/embedder"
+import { splitIntoSemanticChunks, type Chunk } from "../lib/chunk-utils"
 
 // 将文本分割为段落数组
 function splitTextIntoParagraphs(text: string): string[] {
@@ -218,17 +479,20 @@ export const materialRouter = createRouter({
             }
           }
         } else {
-          const chunks = splitIntoChunks(material.content, 500, 100)
-          totalCandidates = chunks.filter(c => c.trim().length >= 50).length
+          const chunks = splitIntoSemanticChunks(material.content, {
+            sourceId: material.id,
+            sourceTitle: material.title,
+          })
+          totalCandidates = chunks.filter((c: Chunk) => c.content.trim().length >= 50).length
 
           for (const chunk of chunks) {
-            if (chunk.trim().length < 50) continue
+            if (chunk.content.trim().length < 50) continue
 
             try {
-              const embedding = await getEmbedding(chunk)
+              const embedding = await getEmbedding(chunk.content)
 
               await db.insert(vectorChunks).values({
-                content: chunk,
+                content: chunk.content,
                 embedding: embedding as unknown as number[],
                 sourceType: material.sourceType,
                 novelId: null,
@@ -237,6 +501,12 @@ export const materialRouter = createRouter({
                   materialId: material.id,
                   materialTitle: material.title,
                   indexedAt: new Date().toISOString(),
+                  sourceId: chunk.sourceId,
+                  sourceTitle: chunk.sourceTitle,
+                  chunkIndex: chunk.chunkIndex,
+                  totalChunks: chunk.totalChunks,
+                  contextBefore: chunk.contextBefore,
+                  contextAfter: chunk.contextAfter,
                 },
               })
 
@@ -407,30 +677,162 @@ ${content}`
           { role: "user", content: userPrompt },
         ],
         temperature: 0.3,
-        maxTokens: 4000,
+        maxTokens: 8000,
       })
 
-      // 容错解析：提取 JSON 代码块或直接解析
-      let jsonText = response.trim()
-      const codeBlockMatch = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/)
-      if (codeBlockMatch) {
-        jsonText = codeBlockMatch[1].trim()
-      }
-
       let parsed: unknown
-      try {
-        parsed = JSON.parse(jsonText)
-      } catch {
-        // 尝试从文本中找第一个 { 到最后一个 }
-        const braceMatch = jsonText.match(/\{[\s\S]*\}/)
-        if (braceMatch) {
-          parsed = JSON.parse(braceMatch[0])
-        } else {
-          throw new Error("AI 返回的内容无法解析为 JSON")
-        }
+      const fixedJson = tryFixTruncatedJson(response)
+      if (fixedJson) {
+        parsed = JSON.parse(fixedJson)
+      } else {
+        console.error("[extractLore] JSON 修复失败，原始响应前2000字符:", response.slice(0, 2000))
+        throw new Error("AI 返回的内容无法解析为有效 JSON")
       }
 
       const validated = extractedLoreSchema.parse(parsed)
       return validated
+    }),
+
+  // 一键自动提取并保存到设定库（无需手动确认）
+  autoExtractLore: publicQuery
+    .input(z.object({
+      materialId: z.number(),
+      seriesId: z.number().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb()
+      const [material] = await db
+        .select()
+        .from(materials)
+        .where(eq(materials.id, input.materialId))
+
+      if (!material) throw new Error("素材不存在")
+      if (!material.content) throw new Error("素材内容为空")
+
+      const targetSeriesId = input.seriesId ?? material.seriesId ?? null
+      if (!targetSeriesId) throw new Error("素材未绑定系列，请指定 seriesId")
+
+      return runAutoExtractLore(input.materialId, targetSeriesId)
+    }),
+
+  // 批量自动提取（异步后台处理，避免504超时）
+  batchAutoExtract: publicQuery
+    .input(z.object({
+      materialIds: z.array(z.number()).max(20, "一次最多处理20条素材"),
+      seriesId: z.number(),
+    }))
+    .mutation(async ({ input }) => {
+      cleanupOldTasks()
+
+      const taskId = generateTaskId()
+      const task: BatchTask = {
+        id: taskId,
+        status: "running",
+        total: input.materialIds.length,
+        processed: 0,
+        currentMaterialId: null,
+        currentMaterialTitle: "",
+        charactersAdded: 0,
+        charactersMerged: 0,
+        errors: [],
+        startedAt: new Date(),
+        completedAt: null,
+      }
+      batchTasks.set(taskId, task)
+
+      // 启动后台处理（不 await，立即返回 taskId）
+      Promise.resolve().then(async () => {
+        for (const materialId of input.materialIds) {
+          if (task.status === "failed") break
+
+          const db = getDb()
+          const [material] = await db
+            .select()
+            .from(materials)
+            .where(eq(materials.id, materialId))
+
+          task.currentMaterialId = materialId
+          task.currentMaterialTitle = material?.title || `素材#${materialId}`
+
+          try {
+            const result = await runAutoExtractLore(materialId, input.seriesId)
+            task.charactersAdded += result.charactersAdded
+            task.charactersMerged += result.charactersMerged
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err)
+            console.error(`[BatchExtract] material ${materialId} failed:`, msg)
+            task.errors.push(`素材#${materialId}: ${msg}`)
+          }
+
+          task.processed++
+        }
+
+        task.status = task.errors.length > 0 && task.processed === 0 ? "failed" : "completed"
+        task.completedAt = new Date()
+        task.currentMaterialId = null
+        task.currentMaterialTitle = ""
+      })
+
+      return { taskId, total: input.materialIds.length }
+    }),
+
+  // 查询批量提取任务进度
+  batchAutoExtractStatus: publicQuery
+    .input(z.object({ taskId: z.string() }))
+    .query(async ({ input }) => {
+      const task = batchTasks.get(input.taskId)
+      if (!task) {
+        return {
+          found: false,
+          status: "failed" as const,
+          message: "任务不存在或已过期（任务保留2小时）",
+        }
+      }
+
+      return {
+        found: true,
+        status: task.status,
+        total: task.total,
+        processed: task.processed,
+        currentMaterialTitle: task.currentMaterialTitle,
+        charactersAdded: task.charactersAdded,
+        charactersMerged: task.charactersMerged,
+        errors: task.errors,
+        startedAt: task.startedAt,
+        completedAt: task.completedAt,
+      }
+    }),
+
+  // 保存为风格样本（生成内容回流）
+  saveAsStyleSample: publicQuery
+    .input(z.object({
+      content: z.string().min(10),
+      seriesId: z.number(),
+      characterTag: z.string().optional(),
+      sceneTag: z.string().optional(),
+      sourceWorkId: z.number().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb()
+
+      // 1. 存入 materials
+      const [material] = await db.insert(materials).values({
+        title: `风格样本 · ${input.characterTag || "通用"} · ${input.sceneTag || "通用"}`,
+        content: input.content,
+        sourceType: "style_sample",
+        seriesId: input.seriesId,
+        tags: [input.characterTag, input.sceneTag].filter((t): t is string => !!t),
+        description: input.sourceWorkId ? `来源二创作品 #${input.sourceWorkId}` : undefined,
+        status: "indexed",
+      }).returning()
+
+      // 2. 自动索引到 vector_chunks
+      await indexNovel(material.id, input.content, {
+        seriesId: input.seriesId,
+        sourceType: "style_sample",
+        sourceTitle: material.title,
+      })
+
+      return material
     }),
 })

@@ -1,9 +1,9 @@
 import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
-import { characterCards, worldBibles, seriesCanon, fanFictionWorks, plotTropes, novels, chapters } from "@db/schema"
+import { characterCards, worldBibles, seriesCanon, fanFictionWorks, plotTropes, novels, chapters, ragFeedback } from "@db/schema"
 import { eq, asc, sql } from "drizzle-orm"
-import { streamChat } from "../services/deepseek"
+import { streamChat, getEmbedding } from "../services/deepseek"
 import { searchSimilar } from "../services/embedder"
 
 const WRITING_MODES = [
@@ -31,6 +31,11 @@ type RagCall = {
   type: "novel_style" | "material" | "keyword"
   content: string
   score?: number
+  sourceTitle?: string       // ← 新增：来源标题
+  chapterNumber?: number     // ← 新增：章节号
+  chunkIndex?: number        // ← 新增：片段序号
+  totalChunks?: number       // ← 新增：总片段数
+  chunkId?: number           // ← 新增：vector_chunks.id，用于反馈闭环
 }
 
 // ========== 创作模式配置 ==========
@@ -254,9 +259,18 @@ async function buildSystemPrompt(
     .orderBy(asc(seriesCanon.eventOrder))
 
   // 4. Hybrid RAG 检索（带角色过滤标记）
+  // 预计算 brief 的 embedding，供向量检索和翻译记忆复用
+  let briefEmbedding: number[] | undefined
+  try {
+    briefEmbedding = await getEmbedding(brief)
+  } catch {
+    // embedding 失败不影响主流程，后续检索会回退到内部计算
+  }
+
   let ragContent = ""
   const ragParts: string[] = []
   const ragCalls: RagCall[] = []
+  const seenChunkIds = new Set<number>() // ← 用于 chunk 级别去重
 
   const buildRagPrefix = (content: string): string => {
     const containsUnselected = unselectedChars.some(c => {
@@ -270,24 +284,44 @@ async function buildSystemPrompt(
 
   // 4a. 从关联小说做向量检索
   if (parentNovelId) {
-    const novelResults = await searchSimilar(brief, { novelId: parentNovelId, limit: params.ragLimit })
+    const novelResults = await searchSimilar(brief, { novelId: parentNovelId, limit: params.ragLimit, embedding: briefEmbedding })
     if (novelResults.length > 0) {
       const content = novelResults.map(r => r.content).join("\n---\n")
       ragParts.push(buildRagPrefix(content) + "【原作风格参考】\n" + content)
       for (const r of novelResults) {
-        ragCalls.push({ type: "novel_style", content: r.content, score: r.similarity })
+        if (r.id) seenChunkIds.add(r.id)
+        ragCalls.push({
+          type: "novel_style",
+          content: r.content,
+          score: r.similarity,
+          sourceTitle: r.sourceTitle,
+          chapterNumber: r.chapterNumber,
+          chunkIndex: r.chunkIndex,
+          totalChunks: r.totalChunks,
+          chunkId: r.id,
+        })
       }
     }
   }
 
   // 4b. 从素材池做向量检索
   if (useMaterials !== false) {
-    const materialVecResults = await searchSimilar(brief, { seriesId, limit: params.ragLimit, materialIds: materialIds?.length ? materialIds : undefined })
+    const materialVecResults = await searchSimilar(brief, { seriesId, limit: params.ragLimit, materialIds: materialIds?.length ? materialIds : undefined, embedding: briefEmbedding })
     if (materialVecResults.length > 0) {
       const content = materialVecResults.map(r => r.content).join("\n---\n")
       ragParts.push(buildRagPrefix(content) + "【投喂素材参考】\n" + content)
       for (const r of materialVecResults) {
-        ragCalls.push({ type: "material", content: r.content, score: r.similarity })
+        if (r.id) seenChunkIds.add(r.id)
+        ragCalls.push({
+          type: "material",
+          content: r.content,
+          score: r.similarity,
+          sourceTitle: r.sourceTitle,
+          chapterNumber: r.chapterNumber,
+          chunkIndex: r.chunkIndex,
+          totalChunks: r.totalChunks,
+          chunkId: r.id,
+        })
       }
     }
   }
@@ -296,7 +330,7 @@ async function buildSystemPrompt(
   try {
     const briefQuery = brief.slice(0, 100)
     const fullText = await db.execute(sql`
-      SELECT content,
+      SELECT id, content,
         ts_rank(to_tsvector('simple', content), plainto_tsquery('simple', ${briefQuery})) as score
       FROM vector_chunks
       WHERE series_id = ${seriesId}
@@ -305,16 +339,75 @@ async function buildSystemPrompt(
       LIMIT ${params.ragLimit}
     `)
     const ftRows = Array.isArray(fullText) ? fullText : []
-    if (ftRows.length > 0) {
-      const ftContent = ftRows.map((r: Record<string, unknown>) => String(r.content)).join("\n---\n")
-      if (!ragParts.some(p => p.includes(ftContent.slice(0, 50)))) {
-        ragParts.push(buildRagPrefix(ftContent) + "【关键词参考】\n" + ftContent)
-        for (const r of ftRows) {
-          ragCalls.push({ type: "keyword", content: String(r.content), score: Number(r.score) })
-        }
+    const newFtRows = ftRows.filter((r: Record<string, unknown>) => !seenChunkIds.has(Number(r.id)))
+    if (newFtRows.length > 0) {
+      const ftContent = newFtRows.map((r: Record<string, unknown>) => String(r.content)).join("\n---\n")
+      ragParts.push(buildRagPrefix(ftContent) + "【关键词参考】\n" + ftContent)
+      for (const r of newFtRows) {
+        const cid = Number(r.id)
+        seenChunkIds.add(cid)
+        ragCalls.push({ type: "keyword", content: String(r.content), score: Number(r.score), chunkId: cid })
       }
     }
   } catch { /* 全文检索可选，失败不影响主流程 */ }
+
+  // 4d. pg_trgm 模糊搜索补充（中文关键词匹配）
+  try {
+    const briefQuery = brief.slice(0, 100)
+    const trgmResults = await db.execute(sql`
+      SELECT id, content, similarity(content, ${briefQuery}) as score
+      FROM vector_chunks
+      WHERE series_id = ${seriesId}
+        AND content % ${briefQuery}
+      ORDER BY score DESC
+      LIMIT ${params.ragLimit}
+    `)
+    const trgmRows = Array.isArray(trgmResults) ? trgmResults : []
+    const newTrgmRows = trgmRows.filter((r: Record<string, unknown>) => !seenChunkIds.has(Number(r.id)))
+    if (newTrgmRows.length > 0) {
+      const trgmContent = newTrgmRows.map((r: Record<string, unknown>) => String(r.content)).join("\n---\n")
+      ragParts.push(buildRagPrefix(trgmContent) + "【模糊匹配参考】\n" + trgmContent)
+      for (const r of newTrgmRows) {
+        const cid = Number(r.id)
+        seenChunkIds.add(cid)
+        ragCalls.push({ type: "keyword", content: String(r.content), score: Number(r.score), chunkId: cid })
+      }
+    }
+  } catch { /* trgm 可选，失败不影响主流程 */ }
+
+  // 4e. 翻译记忆风格检索（当风格忠实度 >= 7 且有关联小说时）
+  if (params.styleFidelity >= 7 && parentNovelId && briefEmbedding) {
+    try {
+      const embeddingJson = JSON.stringify(briefEmbedding)
+      const tmResults = await db.execute(sql`
+        SELECT source_text, translated_text,
+          1 - (embedding <=> ${embeddingJson}) as similarity
+        FROM translation_memory
+        WHERE novel_id = ${parentNovelId}
+        ORDER BY embedding <=> ${embeddingJson}
+        LIMIT 3
+      `)
+      const tmRows = Array.isArray(tmResults) ? tmResults : []
+      if (tmRows.length > 0) {
+        const tmContent = tmRows.map((r: Record<string, unknown>) =>
+          `原文: ${String(r.source_text).slice(0, 100)}\n译文: ${String(r.translated_text).slice(0, 150)}`
+        ).join("\n---\n")
+
+        ragParts.push(
+          "【文风对照样本】以下是原作原文与译文的对应片段，" +
+          "请严格模仿其译文的句式节奏、用词风格和叙事口吻：\n" + tmContent
+        )
+        for (const r of tmRows) {
+          ragCalls.push({
+            type: "material",
+            content: `原文: ${String(r.source_text).slice(0, 100)}\n译文: ${String(r.translated_text).slice(0, 150)}`,
+            score: Number(r.similarity),
+            sourceTitle: "翻译记忆",
+          })
+        }
+      }
+    } catch { /* 翻译记忆检索可选，失败不影响主流程 */ }
+  }
 
   if (ragParts.length > 0) {
     ragContent = "\n" + ragParts.join("\n\n")
@@ -527,6 +620,7 @@ export const generateRouter = createRouter({
         ...input.parameters,
         selectedCharacterIds: input.selectedCharacterIds,
         selectedTropeIds: input.selectedTropeIds,
+        ragCalls,
       }
       const [work] = await db
         .insert(fanFictionWorks)
@@ -540,6 +634,23 @@ export const generateRouter = createRouter({
           status: "draft",
         })
         .returning()
+
+      // 异步记录 RAG 调用日志（反馈闭环用），不阻塞返回
+      try {
+        const feedbackRecords = ragCalls
+          .filter(r => r.chunkId != null)
+          .map(r => ({
+            generationId: work.id,
+            chunkId: r.chunkId,
+            content: r.content.slice(0, 500),
+            similarityScore: r.score ?? null,
+          }))
+        if (feedbackRecords.length > 0) {
+          await db.insert(ragFeedback).values(feedbackRecords)
+        }
+      } catch {
+        // 记录失败不影响主流程
+      }
 
       return { content: fullContent, workId: work.id, ragCalls, warnings }
     }),
@@ -676,6 +787,16 @@ export const generateRouter = createRouter({
         .where(eq(fanFictionWorks.id, id))
         .returning()
       return work
+    }),
+
+  deleteWork: publicQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = getDb()
+      await db
+        .delete(fanFictionWorks)
+        .where(eq(fanFictionWorks.id, input.id))
+      return { success: true }
     }),
 
   list: publicQuery

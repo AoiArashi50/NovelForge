@@ -1,7 +1,7 @@
 import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
-import { plotTropes } from "@db/schema"
+import { plotTropes, tropeCharacterLinks, tropeCanonLinks, characterCards, seriesCanon } from "@db/schema"
 import { eq, asc } from "drizzle-orm"
 import { chatCompletion } from "../services/deepseek"
 
@@ -13,6 +13,7 @@ interface ExtractionTask {
   completedBatches: number
   message: string
   createdAt: number
+  sourceTitles?: string[]
   result?: { tropes: (typeof plotTropes.$inferSelect)[]; count: number }
   error?: string
 }
@@ -36,16 +37,36 @@ setInterval(() => {
 /* ========== Router ========== */
 
 export const tropeRouter = createRouter({
-  // 列出系列下的桥段
+  // 列出系列下的桥段（含关联角色）
   list: publicQuery
     .input(z.object({ seriesId: z.number() }))
     .query(async ({ input }) => {
       const db = getDb()
-      return db
+      const tropes = await db
         .select()
         .from(plotTropes)
         .where(eq(plotTropes.seriesId, input.seriesId))
         .orderBy(asc(plotTropes.name))
+
+      const links = await db
+        .select({
+          tropeId: tropeCharacterLinks.tropeId,
+          characterId: tropeCharacterLinks.characterId,
+          role: tropeCharacterLinks.role,
+          characterName: characterCards.name,
+        })
+        .from(tropeCharacterLinks)
+        .innerJoin(characterCards, eq(tropeCharacterLinks.characterId, characterCards.id))
+        .where(eq(characterCards.seriesId, input.seriesId))
+
+      return tropes.map(t => ({
+        ...t,
+        linkedCharacters: links.filter(l => l.tropeId === t.id).map(l => ({
+          id: l.characterId,
+          name: l.characterName,
+          role: l.role,
+        })),
+      }))
     }),
 
   // 手动创建桥段
@@ -113,8 +134,82 @@ export const tropeRouter = createRouter({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = getDb()
+      await db.delete(tropeCharacterLinks).where(eq(tropeCharacterLinks.tropeId, input.id))
+      await db.delete(tropeCanonLinks).where(eq(tropeCanonLinks.tropeId, input.id))
       await db.delete(plotTropes).where(eq(plotTropes.id, input.id))
       return { success: true }
+    }),
+
+  // 关联角色
+  linkCharacters: publicQuery
+    .input(z.object({
+      tropeId: z.number(),
+      characterIds: z.array(z.object({ id: z.number(), role: z.string().optional() })),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb()
+      await db.delete(tropeCharacterLinks).where(eq(tropeCharacterLinks.tropeId, input.tropeId))
+      if (input.characterIds.length > 0) {
+        await db.insert(tropeCharacterLinks).values(
+          input.characterIds.map(c => ({
+            tropeId: input.tropeId,
+            characterId: c.id,
+            role: c.role || null,
+          }))
+        )
+      }
+      return { success: true }
+    }),
+
+  // 关联正史事件
+  linkCanonEvents: publicQuery
+    .input(z.object({
+      tropeId: z.number(),
+      canonEventIds: z.array(z.number()),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb()
+      await db.delete(tropeCanonLinks).where(eq(tropeCanonLinks.tropeId, input.tropeId))
+      if (input.canonEventIds.length > 0) {
+        await db.insert(tropeCanonLinks).values(
+          input.canonEventIds.map(id => ({
+            tropeId: input.tropeId,
+            canonEventId: id,
+          }))
+        )
+      }
+      return { success: true }
+    }),
+
+  // 获取桥段详情（含关联角色和正史）
+  getWithLinks: publicQuery
+    .input(z.object({ id: z.number() }))
+    .query(async ({ input }) => {
+      const db = getDb()
+      const [trope] = await db.select().from(plotTropes).where(eq(plotTropes.id, input.id))
+      if (!trope) return null
+
+      const charLinks = await db
+        .select({
+          characterId: tropeCharacterLinks.characterId,
+          role: tropeCharacterLinks.role,
+          name: characterCards.name,
+        })
+        .from(tropeCharacterLinks)
+        .innerJoin(characterCards, eq(tropeCharacterLinks.characterId, characterCards.id))
+        .where(eq(tropeCharacterLinks.tropeId, input.id))
+
+      const canonLinks = await db
+        .select({
+          canonEventId: tropeCanonLinks.canonEventId,
+          eventOrder: seriesCanon.eventOrder,
+          description: seriesCanon.description,
+        })
+        .from(tropeCanonLinks)
+        .innerJoin(seriesCanon, eq(tropeCanonLinks.canonEventId, seriesCanon.id))
+        .where(eq(tropeCanonLinks.tropeId, input.id))
+
+      return { trope, characters: charLinks, canonEvents: canonLinks }
     }),
 
   // 启动提取任务（后台异步）
@@ -130,15 +225,16 @@ export const tropeRouter = createRouter({
 
       // 1. 获取全部素材内容
       let contents: string[] = []
+      let sourceTitles: string[] = []
       if (input.materialIds && input.materialIds.length > 0) {
         const { materials } = await import("@db/schema")
         const rows = await db
           .select()
           .from(materials)
           .where(eq(materials.seriesId, input.seriesId))
-        contents = rows
-          .filter((r) => input.materialIds!.includes(r.id))
-          .map((r) => `【${r.title}】\n${r.content}`)
+        const filtered = rows.filter((r) => input.materialIds!.includes(r.id))
+        contents = filtered.map((r) => `【${r.title}】\n${r.content}`)
+        sourceTitles = filtered.map((r) => r.title)
       } else {
         const { vectorChunks } = await import("@db/schema")
         const rows = await db
@@ -148,6 +244,7 @@ export const tropeRouter = createRouter({
         contents = rows
           .map((r) => r.content)
           .filter((c) => c && c.trim().length > 0)
+        sourceTitles = ["RAG索引片段"]
       }
 
       if (contents.length === 0) {
@@ -195,10 +292,11 @@ export const tropeRouter = createRouter({
         completedBatches: 0,
         message: "任务已创建，准备开始...",
         createdAt: Date.now(),
+        sourceTitles,
       })
 
       // 后台执行（不 await，mutation 立即返回）
-      void runExtractionTask(taskId, input.seriesId, finalChunks)
+      void runExtractionTask(taskId, input.seriesId, finalChunks, sourceTitles)
 
       return { taskId, totalBatches: finalChunks.length }
     }),
@@ -234,7 +332,8 @@ export const tropeRouter = createRouter({
 async function runExtractionTask(
   taskId: number,
   seriesId: number,
-  chunks: string[][]
+  chunks: string[][],
+  sourceTitles: string[]
 ) {
   const task = extractionTasks.get(taskId)
   if (!task) return
@@ -340,6 +439,7 @@ async function runExtractionTask(
             pattern: t.pattern || null,
             examples: t.examples as unknown as Record<string, unknown>[],
             tags: t.tags as unknown as Record<string, unknown>[],
+            sourceChunks: sourceTitles.map(title => ({ title, type: "material" })) as unknown as Record<string, unknown>[],
           })
           .returning()
         created.push(trope)

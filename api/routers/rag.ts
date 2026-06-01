@@ -1,7 +1,7 @@
 import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
-import { vectorChunks, chapters } from "@db/schema"
+import { vectorChunks, chapters, novels, ragFeedback } from "@db/schema"
 import { eq } from "drizzle-orm"
 import { indexNovel, searchSimilar } from "../services/embedder"
 
@@ -49,14 +49,39 @@ export const ragRouter = createRouter({
         .delete(vectorChunks)
         .where(eq(vectorChunks.novelId, input.novelId))
 
+      // 获取小说标题
+      const [novelInfo] = await db
+        .select()
+        .from(novels)
+        .where(eq(novels.id, input.novelId))
+
       // 创建新索引
       const result = await indexNovel(
         input.novelId,
         fullText,
-        input.seriesId,
-        "reference"
+        {
+          seriesId: input.seriesId,
+          sourceType: "reference",
+          sourceTitle: novelInfo?.title || `novel_${input.novelId}`,
+        }
       )
 
       return result
+    }),
+
+  // RAG 效果反馈闭环 — 用户评分
+  feedback: publicQuery
+    .input(z.object({
+      generationId: z.number(),
+      wasHelpful: z.boolean(),
+      reason: z.string().optional(),
+    }))
+    .mutation(async ({ input }) => {
+      const db = getDb()
+      // 找到该 generation 对应的所有 ragFeedback 记录，更新 wasHelpful
+      await db.update(ragFeedback)
+        .set({ wasHelpful: input.wasHelpful })
+        .where(eq(ragFeedback.generationId, input.generationId))
+      return { success: true }
     }),
 })
