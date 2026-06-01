@@ -53,6 +53,7 @@ export default function LoreLibrary() {
 
   // 动态世界观维度 + 提取
   const [aspects, setAspects] = useState<Array<{ id: string; name: string; content: string }>>([])
+  const [isEditingWorldBible, setIsEditingWorldBible] = useState(false)
   const [showExtractModal, setShowExtractModal] = useState(false)
   const [selectedMaterialIdsForExtract, setSelectedMaterialIdsForExtract] = useState<number[]>([])
   const [extractPreview, setExtractPreview] = useState<{
@@ -274,6 +275,35 @@ export default function LoreLibrary() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [extractStatusData?.status])
 
+  // 世界观数据加载：查询返回后自动同步到本地表单 state
+  useEffect(() => {
+    if (worldBible) {
+      setWbGeography(worldBible.geography || "")
+      setWbMagic(worldBible.magicSystem || "")
+      setWbTech(worldBible.technologyLevel || "")
+      setWbCustoms(worldBible.culturalCustoms || "")
+      setWbLinguistics(worldBible.linguisticNotes || "")
+      setWbFactions(JSON.stringify(worldBible.factions || [], null, 2))
+      setWbTimeline(JSON.stringify(worldBible.timelineEvents || [], null, 2))
+      setAspects((worldBible.aspects || []) as Array<{ id: string; name: string; content: string }>)
+    } else {
+      // 无世界观时清空表单
+      setWbGeography("")
+      setWbMagic("")
+      setWbTech("")
+      setWbCustoms("")
+      setWbLinguistics("")
+      setWbFactions("")
+      setWbTimeline("")
+      setAspects([])
+    }
+  }, [worldBible])
+
+  // 切换系列或离开世界观 tab 时退出编辑模式
+  useEffect(() => {
+    setIsEditingWorldBible(false)
+  }, [selectedSeriesId, activeTab])
+
   const resetTropeForm = () => {
     setTropeName("")
     setTropeDesc("")
@@ -334,17 +364,6 @@ export default function LoreLibrary() {
   const selectedSeries = seriesList?.find(s => s.id === selectedSeriesId)
 
   const resetCharForm = () => charForm.reset()
-
-  const resetWorldBibleForm = () => {
-    setWbGeography(worldBible?.geography || "")
-    setWbMagic(worldBible?.magicSystem || "")
-    setWbTech(worldBible?.technologyLevel || "")
-    setWbCustoms(worldBible?.culturalCustoms || "")
-    setWbLinguistics(worldBible?.linguisticNotes || "")
-    setWbFactions(JSON.stringify(worldBible?.factions || [], null, 2))
-    setWbTimeline(JSON.stringify(worldBible?.timelineEvents || [], null, 2))
-    setAspects((worldBible?.aspects || []) as Array<{ id: string; name: string; content: string }>)
-  }
 
   const handleCreateSeries = () => {
     if (!seriesName.trim()) return
@@ -853,102 +872,192 @@ export default function LoreLibrary() {
                           <Database className="w-3.5 h-3.5" />
                           从素材提取
                         </button>
-                        {worldBible && (
+                        {!isEditingWorldBible && worldBible && (
                           <button
-                            onClick={resetWorldBibleForm}
+                            onClick={() => setIsEditingWorldBible(true)}
                             className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors"
                           >
                             <Edit className="w-3.5 h-3.5 inline mr-1" /> 编辑
                           </button>
                         )}
+                        {!isEditingWorldBible && !worldBible && (
+                          <button
+                            onClick={() => setIsEditingWorldBible(true)}
+                            className="px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 rounded-full text-sm transition-colors"
+                          >
+                            <Plus className="w-3.5 h-3.5 inline mr-1" /> 添加世界观
+                          </button>
+                        )}
+                        {isEditingWorldBible && (
+                          <button
+                            onClick={() => setIsEditingWorldBible(false)}
+                            className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors text-white/60"
+                          >
+                            <X className="w-3.5 h-3.5 inline mr-1" /> 取消
+                          </button>
+                        )}
                       </div>
                     </div>
 
-                    {/* 动态维度列表 */}
-                    <div className="space-y-3">
-                      <SortableList
-                        items={aspects}
-                        onReorder={(ordered) => {
-                          setAspects(ordered)
-                          if (selectedSeriesId && worldBible) {
-                            reorderAspectsMutation.mutate({
-                              seriesId: selectedSeriesId,
-                              aspects: ordered,
-                            })
-                          }
-                        }}
-                        renderItem={(aspect, idx) => (
-                          <div className="p-4 rounded-xl bg-white/[0.03] border border-white/10">
-                            <div className="flex items-center gap-2 mb-2">
-                              <input
-                                value={aspect.name}
-                                onChange={e => {
-                                  const next = [...aspects]
-                                  next[idx] = { ...aspect, name: e.target.value }
-                                  setAspects(next)
-                                }}
-                                placeholder="维度名称，如：斗气体系"
-                                className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm font-medium"
-                              />
-                              <button
-                                onClick={() => setAspects(prev => prev.filter((_, i) => i !== idx))}
-                                className="p-1.5 rounded-lg hover:bg-red-500/20 text-white/30 hover:text-red-400 transition-colors"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                            <RichTextEditor
-                              value={aspect.content}
-                              onChange={(value) => {
-                                const next = [...aspects]
-                                next[idx] = { ...aspect, content: value }
-                                setAspects(next)
-                              }}
-                              placeholder="详细描述..."
-                              minHeight="80px"
-                              plainText
+                    {/* 编辑模式 */}
+                    {isEditingWorldBible ? (
+                      <div className="space-y-6">
+                        {/* 动态维度列表 */}
+                        <div className="space-y-3">
+                          <SortableList
+                            items={aspects}
+                            onReorder={(ordered) => {
+                              setAspects(ordered)
+                              if (selectedSeriesId && worldBible) {
+                                reorderAspectsMutation.mutate({
+                                  seriesId: selectedSeriesId,
+                                  aspects: ordered,
+                                })
+                              }
+                            }}
+                            renderItem={(aspect, idx) => (
+                              <div className="p-4 rounded-xl bg-white/[0.03] border border-white/10">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <input
+                                    value={aspect.name}
+                                    onChange={e => {
+                                      const next = [...aspects]
+                                      next[idx] = { ...aspect, name: e.target.value }
+                                      setAspects(next)
+                                    }}
+                                    placeholder="维度名称，如：斗气体系"
+                                    className="flex-1 px-3 py-1.5 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm font-medium"
+                                  />
+                                  <button
+                                    onClick={() => setAspects(prev => prev.filter((_, i) => i !== idx))}
+                                    className="p-1.5 rounded-lg hover:bg-red-500/20 text-white/30 hover:text-red-400 transition-colors"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                                <RichTextEditor
+                                  value={aspect.content}
+                                  onChange={(value) => {
+                                    const next = [...aspects]
+                                    next[idx] = { ...aspect, content: value }
+                                    setAspects(next)
+                                  }}
+                                  placeholder="详细描述..."
+                                  minHeight="80px"
+                                  plainText
+                                />
+                              </div>
+                            )}
+                          />
+                          <button
+                            onClick={() => setAspects(prev => [...prev, { id: `aspect_${Date.now()}_${prev.length}`, name: "", content: "" }])}
+                            className="w-full py-2.5 rounded-xl border border-dashed border-white/10 hover:border-amber-500/30 text-white/40 hover:text-amber-400 transition-colors text-sm flex items-center justify-center gap-2"
+                          >
+                            <Plus className="w-4 h-4" /> 添加维度
+                          </button>
+                        </div>
+
+                        {/* 势力 & 时间线 */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-white/10">
+                          <div>
+                            <label className="block font-mono text-xs text-white/50 mb-2">势力分布 (JSON)</label>
+                            <textarea
+                              value={wbFactions}
+                              onChange={e => setWbFactions(e.target.value)}
+                              placeholder='[{"name": "势力名", "description": "描述"}]'
+                              className="w-full h-24 px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none font-mono placeholder:text-white/40"
                             />
                           </div>
+                          <div>
+                            <label className="block font-mono text-xs text-white/50 mb-2">时间线事件 (JSON)</label>
+                            <textarea
+                              value={wbTimeline}
+                              onChange={e => setWbTimeline(e.target.value)}
+                              placeholder='[{"order": 1, "description": "事件描述"}]'
+                              className="w-full h-24 px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none font-mono placeholder:text-white/40"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-3">
+                          <button
+                            onClick={handleUpsertWorldBible}
+                            disabled={upsertWorldBible.isPending}
+                            className="flex items-center gap-2 px-6 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium text-sm"
+                          >
+                            {upsertWorldBible.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
+                            <Save className="w-4 h-4" /> 保存世界观
+                          </button>
+                          <button
+                            onClick={() => setIsEditingWorldBible(false)}
+                            className="px-6 py-2.5 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors"
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : worldBible ? (
+                      /* 查看模式 */
+                      <div className="space-y-6">
+                        {/* 维度列表 */}
+                        {aspects.length > 0 && (
+                          <div className="space-y-3">
+                            {aspects.map((aspect) => (
+                              <div key={aspect.id} className="p-4 rounded-xl bg-white/[0.03] border border-white/10">
+                                <h4 className="text-sm font-medium text-amber-400 mb-2">{aspect.name}</h4>
+                                <div className="text-sm text-white/70 whitespace-pre-wrap">{aspect.content}</div>
+                              </div>
+                            ))}
+                          </div>
                         )}
-                      />
-                      <button
-                        onClick={() => setAspects(prev => [...prev, { id: `aspect_${Date.now()}_${prev.length}`, name: "", content: "" }])}
-                        className="w-full py-2.5 rounded-xl border border-dashed border-white/10 hover:border-amber-500/30 text-white/40 hover:text-amber-400 transition-colors text-sm flex items-center justify-center gap-2"
-                      >
-                        <Plus className="w-4 h-4" /> 添加维度
-                      </button>
-                    </div>
-
-                    {/* 势力 & 时间线 */}
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-4 border-t border-white/10">
-                      <div>
-                        <label className="block font-mono text-xs text-white/50 mb-2">势力分布 (JSON)</label>
-                        <textarea
-                          value={wbFactions}
-                          onChange={e => setWbFactions(e.target.value)}
-                          placeholder='[{"name": "势力名", "description": "描述"}]'
-                          className="w-full h-24 px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none font-mono placeholder:text-white/40"
-                        />
+                        {/* 势力 */}
+                        {(worldBible.factions as Array<{ name: string; description: string }> || []).length > 0 && (
+                          <div className="pt-4 border-t border-white/10">
+                            <h4 className="text-sm font-medium text-white/50 mb-3">势力分布</h4>
+                            <div className="space-y-2">
+                              {(worldBible.factions as Array<{ name: string; description: string }>).map((f, i) => (
+                                <div key={i} className="p-3 rounded-lg bg-white/5 border border-white/10">
+                                  <span className="text-sm font-medium text-[#FDFBF5]">{f.name}</span>
+                                  <p className="text-xs text-white/50 mt-1">{f.description}</p>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {/* 时间线 */}
+                        {(worldBible.timelineEvents as Array<{ order: number; description: string }> || []).length > 0 && (
+                          <div className="pt-4 border-t border-white/10">
+                            <h4 className="text-sm font-medium text-white/50 mb-3">时间线</h4>
+                            <div className="space-y-2">
+                              {(worldBible.timelineEvents as Array<{ order: number; description: string }>)
+                                .sort((a, b) => a.order - b.order)
+                                .map((e, i) => (
+                                  <div key={i} className="flex items-start gap-3 p-3 rounded-lg bg-white/5 border border-white/10">
+                                    <span className="text-xs font-mono text-amber-500 shrink-0 w-6">{e.order}</span>
+                                    <p className="text-sm text-white/70">{e.description}</p>
+                                  </div>
+                                ))}
+                            </div>
+                          </div>
+                        )}
+                        {/* 空维度提示 */}
+                        {aspects.length === 0 &&
+                          (worldBible.factions as Array<unknown> || []).length === 0 &&
+                          (worldBible.timelineEvents as Array<unknown> || []).length === 0 && (
+                          <div className="text-center py-12 text-white/30">
+                            <Globe className="w-10 h-10 mx-auto mb-3 opacity-40" />
+                            <p className="text-sm">世界观内容为空，点击"编辑"开始添加</p>
+                          </div>
+                        )}
                       </div>
-                      <div>
-                        <label className="block font-mono text-xs text-white/50 mb-2">时间线事件 (JSON)</label>
-                        <textarea
-                          value={wbTimeline}
-                          onChange={e => setWbTimeline(e.target.value)}
-                          placeholder='[{"order": 1, "description": "事件描述"}]'
-                          className="w-full h-24 px-4 py-3 rounded-xl bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none font-mono placeholder:text-white/40"
-                        />
+                    ) : (
+                      /* 空状态 */
+                      <div className="text-center py-16 text-white/30">
+                        <Globe className="w-12 h-12 mx-auto mb-4 opacity-40" />
+                        <p className="text-sm mb-2">暂无世界观设定</p>
+                        <p className="text-xs text-white/20">点击"添加世界观"手动创建，或"从素材提取"让 AI 自动生成</p>
                       </div>
-                    </div>
-
-                    <button
-                      onClick={handleUpsertWorldBible}
-                      disabled={upsertWorldBible.isPending}
-                      className="flex items-center gap-2 px-6 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium text-sm"
-                    >
-                      {upsertWorldBible.isPending && <Loader2 className="w-4 h-4 animate-spin" />}
-                      <Save className="w-4 h-4" /> 保存世界观
-                    </button>
+                    )}
                   </div>
                 )}
 
@@ -1417,6 +1526,8 @@ export default function LoreLibrary() {
                       }
                       setShowExtractModal(false)
                       setExtractPreview(null)
+                      setIsEditingWorldBible(true)
+                      setActiveTab("world")
                     }}
                     className="flex items-center gap-2 px-5 py-2 bg-amber-500 hover:bg-amber-400 text-[#111827] rounded-full font-medium text-sm"
                   >
