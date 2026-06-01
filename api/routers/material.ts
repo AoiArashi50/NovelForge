@@ -4,6 +4,7 @@ import { getDb } from "../queries/connection"
 import { materials, translationMemory, vectorChunks, characterCards, worldBibles } from "@db/schema"
 import { eq, desc, sql, and } from "drizzle-orm"
 import { tryFixTruncatedJson } from "../lib/json-utils"
+import { findPotentialDuplicates, type PotentialDuplicate } from "../lib/dedup-utils"
 
 // ========== 批量提取异步任务状态（内存队列，单用户场景）==========
 
@@ -18,6 +19,7 @@ interface BatchTask {
   currentMaterialTitle: string
   charactersAdded: number
   charactersMerged: number
+  potentialDuplicates: PotentialDuplicate[]
   errors: string[]
   startedAt: Date
   completedAt: Date | null
@@ -49,6 +51,7 @@ async function runAutoExtractLore(
   worldBibleCreated: boolean
   worldBibleMerged: boolean
   materialTitle: string
+  potentialDuplicates: PotentialDuplicate[]
 }> {
   const db = getDb()
 
@@ -127,6 +130,7 @@ ${content}`
   // 导入角色（同名或别名重叠自动合并）
   let charactersAdded = 0
   let charactersMerged = 0
+  const addedCharacters: Array<{ name: string; aliases: string[] }> = []
 
   // 预加载系列下所有角色，用于别名匹配
   const seriesCharacters = await db
@@ -201,10 +205,23 @@ ${content}`
         taboos: char.taboos as unknown as Record<string, unknown>[],
         canonicalArcSummary: char.canonicalArcSummary || null,
       }).returning()
-      if (inserted) seriesCharacters.push(inserted)
+      if (inserted) {
+        seriesCharacters.push(inserted)
+        addedCharacters.push({ name: char.name, aliases: char.aliases || [] })
+      }
       charactersAdded++
     }
   }
+
+  // 检测新增角色与已有角色的潜在重复（模糊匹配）
+  const existingForDedup = seriesCharacters
+    .filter(c => !addedCharacters.some(a => a.name === c.name))
+    .map(c => ({
+      id: c.id,
+      name: c.name,
+      aliases: (c.aliases as string[] || []).filter(Boolean),
+    }))
+  const potentialDuplicates = findPotentialDuplicates(addedCharacters, existingForDedup)
 
   // 导入世界观（自动合并）
   let worldBibleCreated = false
@@ -273,6 +290,7 @@ ${content}`
     worldBibleCreated,
     worldBibleMerged,
     materialTitle: material.title,
+    potentialDuplicates,
   }
 }
 import { getEmbedding, chatCompletion } from "../services/deepseek"
@@ -734,6 +752,7 @@ ${content}`
         currentMaterialTitle: "",
         charactersAdded: 0,
         charactersMerged: 0,
+        potentialDuplicates: [],
         errors: [],
         startedAt: new Date(),
         completedAt: null,
@@ -758,6 +777,7 @@ ${content}`
             const result = await runAutoExtractLore(materialId, input.seriesId)
             task.charactersAdded += result.charactersAdded
             task.charactersMerged += result.charactersMerged
+            task.potentialDuplicates.push(...result.potentialDuplicates)
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err)
             console.error(`[BatchExtract] material ${materialId} failed:`, msg)
@@ -797,6 +817,7 @@ ${content}`
         currentMaterialTitle: task.currentMaterialTitle,
         charactersAdded: task.charactersAdded,
         charactersMerged: task.charactersMerged,
+        potentialDuplicates: task.potentialDuplicates,
         errors: task.errors,
         startedAt: task.startedAt,
         completedAt: task.completedAt,

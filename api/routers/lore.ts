@@ -4,6 +4,7 @@ import { getDb } from "../queries/connection"
 import { series, characterCards, worldBibles, seriesCanon, materials, plotTropes } from "@db/schema"
 import { eq, asc, inArray, sql, and } from "drizzle-orm"
 import { chatCompletion } from "../services/deepseek"
+import { findDuplicateGroups, recommendKeepId } from "../lib/dedup-utils"
 
 export const loreRouter = createRouter({
   // Series
@@ -224,7 +225,7 @@ ${combined}
         return profile
       }),
 
-    // 检测系列中的重复角色（同名或别名重叠）
+    // 检测系列中的重复角色（精确匹配 + 子串匹配 + 编辑距离模糊匹配）
     findDuplicates: publicQuery
       .input(z.object({ seriesId: z.number() }))
       .query(async ({ input }) => {
@@ -234,43 +235,28 @@ ${combined}
           .from(characterCards)
           .where(eq(characterCards.seriesId, input.seriesId))
 
-        const groups: Array<{ ids: number[]; names: string[]; reason: string }> = []
-        const processed = new Set<number>()
+        const charRefs = chars.map(c => ({
+          id: c.id,
+          name: c.name,
+          aliases: (c.aliases as string[] || []).filter(Boolean),
+        }))
 
-        for (let i = 0; i < chars.length; i++) {
-          if (processed.has(chars[i].id)) continue
-          const group = [chars[i]]
-          const iNames = new Set([chars[i].name, ...(chars[i].aliases as string[] || [])].map(n => String(n).trim()).filter(n => n.length > 0))
-          if (iNames.size === 0) continue
+        const groups = findDuplicateGroups(charRefs)
 
-          for (let j = i + 1; j < chars.length; j++) {
-            if (processed.has(chars[j].id)) continue
-            const jNames = new Set([chars[j].name, ...(chars[j].aliases as string[] || [])].map(n => String(n).trim()).filter(n => n.length > 0))
-            let overlap = false
-            for (const name of iNames) {
-              if (jNames.has(name)) { overlap = true; break }
-            }
-            if (overlap) group.push(chars[j])
-          }
+        // 为每组推荐保留的角色（字段最全者）
+        const groupsWithRecommend = groups.map(g => ({
+          ...g,
+          recommendedKeepId: recommendKeepId(g.ids, chars),
+        }))
 
-          if (group.length > 1) {
-            const allNames = [...new Set(group.flatMap(c => [c.name, ...(c.aliases as string[] || [])]))].map(n => String(n).trim()).filter(n => n.length > 0)
-            const reason = group.some(c => c.name === group[0].name)
-              ? `同名「${group[0].name}」`
-              : `别名重叠「${allNames.join(", ")}」`
-            groups.push({
-              ids: group.map(c => c.id),
-              names: group.map(c => c.name),
-              reason,
-            })
-            group.forEach(c => processed.add(c.id))
-          }
+        return {
+          groups: groupsWithRecommend,
+          totalCharacters: chars.length,
+          duplicateCount: groups.length,
         }
-
-        return { groups, totalCharacters: chars.length }
       }),
 
-    // 合并多个重复角色到保留的角色
+    // 合并多个重复角色到保留的角色（智能字段合并）
     merge: publicQuery
       .input(z.object({
         keepId: z.number(),
@@ -301,20 +287,28 @@ ${combined}
           Object.assign(mergedRelationships, v.relationships as Record<string, unknown> || {})
         }
 
-        await db.update(characterCards)
+        // 智能选择字段：保留字段最全的，而非机械地用 keep 的字段
+        const allChars = [keep, ...victims]
+        const bestAge = allChars.find(c => c.age)?.age || null
+        const bestCoreMotivations = allChars.find(c => c.coreMotivations)?.coreMotivations || null
+        const bestSpeechPatterns = allChars.find(c => c.speechPatterns)?.speechPatterns || null
+        const bestCanonicalArcSummary = allChars.find(c => c.canonicalArcSummary)?.canonicalArcSummary || null
+
+        const [updated] = await db.update(characterCards)
           .set({
             aliases: [...mergedAliases] as unknown as Record<string, unknown>[],
             personalityTraits: mergedTraits as unknown as Record<string, unknown>[],
             taboos: mergedTaboos as unknown as Record<string, unknown>[],
             appearanceTags: mergedAppearance as unknown as Record<string, unknown>[],
             relationships: mergedRelationships as unknown as Record<string, unknown>,
-            age: keep.age || victims.find(v => v.age)?.age || null,
-            coreMotivations: keep.coreMotivations || victims.find(v => v.coreMotivations)?.coreMotivations || null,
-            speechPatterns: keep.speechPatterns || victims.find(v => v.speechPatterns)?.speechPatterns || null,
-            canonicalArcSummary: keep.canonicalArcSummary || victims.find(v => v.canonicalArcSummary)?.canonicalArcSummary || null,
+            age: bestAge,
+            coreMotivations: bestCoreMotivations,
+            speechPatterns: bestSpeechPatterns,
+            canonicalArcSummary: bestCanonicalArcSummary,
             updatedAt: new Date(),
           })
           .where(eq(characterCards.id, keep.id))
+          .returning()
 
         await db.delete(characterCards).where(sql`${characterCards.id} IN (${input.mergeIds.join(",")})`)
 
@@ -323,6 +317,7 @@ ${combined}
           keepName: keep.name,
           mergedCount: victims.length,
           mergedAliases: [...mergedAliases],
+          updatedCharacter: updated,
         }
       }),
   }),
