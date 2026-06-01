@@ -4,7 +4,7 @@ import { getDb } from "../queries/connection"
 import { materials, translationMemory, vectorChunks, characterCards, worldBibles } from "@db/schema"
 import { eq, desc, sql, and } from "drizzle-orm"
 import { tryFixTruncatedJson } from "../lib/json-utils"
-import { findPotentialDuplicates, type PotentialDuplicate } from "../lib/dedup-utils"
+import { findPotentialDuplicates, type PotentialDuplicate, findDuplicateAspectGroups, mergeDuplicateAspects } from "../lib/dedup-utils"
 
 // ========== 批量提取异步任务状态（内存队列，单用户场景）==========
 
@@ -242,7 +242,13 @@ ${content}`
       if (wb.culturalCustoms && !existingWb.culturalCustoms) newAspects.push({ id: `asp_cul_${Date.now()}`, name: "文化习俗", content: wb.culturalCustoms })
       if (wb.linguisticNotes && !existingWb.linguisticNotes) newAspects.push({ id: `asp_ling_${Date.now()}`, name: "语言命名", content: wb.linguisticNotes })
 
-      const mergedAspects = [...existingAspects, ...newAspects]
+      // 对 aspects 做去重合并（同名或近似维度合并内容）
+      const allAspects = [...existingAspects, ...newAspects]
+      const dupGroups = findDuplicateAspectGroups(allAspects)
+      const dedupedAspects = dupGroups.length > 0
+        ? mergeDuplicateAspects(allAspects, dupGroups)
+        : allAspects
+
       const mergedFactions = [...((existingWb.factions as Array<{ name: string; description: string }>) || []), ...(wb.factions || [])]
       const mergedTimeline = [...((existingWb.timelineEvents as Array<{ order: number; description: string }>) || []), ...(wb.timelineEvents || [])]
 
@@ -256,7 +262,7 @@ ${content}`
           linguisticNotes: existingWb.linguisticNotes || wb.linguisticNotes || null,
           factions: mergedFactions as unknown as Record<string, unknown>[],
           timelineEvents: mergedTimeline as unknown as Record<string, unknown>[],
-          aspects: mergedAspects as unknown as Record<string, unknown>[],
+          aspects: dedupedAspects as unknown as Record<string, unknown>[],
           updatedAt: new Date(),
         })
         .where(eq(worldBibles.id, existingWb.id))
@@ -269,6 +275,12 @@ ${content}`
       if (wb.culturalCustoms) aspects.push({ id: `asp_cul_${Date.now()}`, name: "文化习俗", content: wb.culturalCustoms })
       if (wb.linguisticNotes) aspects.push({ id: `asp_ling_${Date.now()}`, name: "语言命名", content: wb.linguisticNotes })
 
+      // 新建时也做去重（防止同一批提取中出现重复维度）
+      const dupGroups = findDuplicateAspectGroups(aspects)
+      const dedupedAspects = dupGroups.length > 0
+        ? mergeDuplicateAspects(aspects, dupGroups)
+        : aspects
+
       await db.insert(worldBibles).values({
         seriesId: targetSeriesId,
         geography: wb.geography || null,
@@ -278,7 +290,7 @@ ${content}`
         linguisticNotes: wb.linguisticNotes || null,
         factions: (wb.factions || []) as unknown as Record<string, unknown>[],
         timelineEvents: (wb.timelineEvents || []) as unknown as Record<string, unknown>[],
-        aspects: aspects as unknown as Record<string, unknown>[],
+        aspects: dedupedAspects as unknown as Record<string, unknown>[],
       })
       worldBibleCreated = true
     }
