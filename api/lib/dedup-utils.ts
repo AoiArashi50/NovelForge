@@ -298,6 +298,163 @@ export function findPotentialDuplicates(
   return results
 }
 
+// ========== 世界观维度去重 ==========
+
+export interface AspectRef {
+  id: string
+  name: string
+  content: string
+}
+
+export interface DuplicateAspectGroup {
+  ids: string[]
+  names: string[]
+  reason: string
+  matchType: "exact" | "substring" | "fuzzy"
+  confidence: number
+}
+
+/**
+ * 在世界观维度中查找重复组（同名或名称近似的维度）
+ */
+export function findDuplicateAspectGroups(aspects: AspectRef[]): DuplicateAspectGroup[] {
+  const n = aspects.length
+  if (n < 2) return []
+
+  const adjacency = new Map<string, Set<string>>()
+  const matchRecords = new Map<string, MatchResult>()
+
+  function getKey(id1: string, id2: string): string {
+    return id1 < id2 ? `${id1}-${id2}` : `${id2}-${id1}`
+  }
+
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const a = aspects[i]
+      const b = aspects[j]
+      const result = checkNameOverlap([a.name], [b.name])
+      if (result.matched) {
+        const key = getKey(a.id, b.id)
+        matchRecords.set(key, result)
+        if (!adjacency.has(a.id)) adjacency.set(a.id, new Set())
+        if (!adjacency.has(b.id)) adjacency.set(b.id, new Set())
+        adjacency.get(a.id)!.add(b.id)
+        adjacency.get(b.id)!.add(a.id)
+      }
+    }
+  }
+
+  const visited = new Set<string>()
+  const groups: DuplicateAspectGroup[] = []
+
+  for (const startId of adjacency.keys()) {
+    if (visited.has(startId)) continue
+
+    const groupIds: string[] = []
+    const queue = [startId]
+    visited.add(startId)
+
+    while (queue.length > 0) {
+      const id = queue.shift()!
+      groupIds.push(id)
+      for (const neighbor of adjacency.get(id) || []) {
+        if (!visited.has(neighbor)) {
+          visited.add(neighbor)
+          queue.push(neighbor)
+        }
+      }
+    }
+
+    if (groupIds.length > 1) {
+      let totalConfidence = 0
+      let matchCount = 0
+      let dominantType: DuplicateAspectGroup["matchType"] = "exact"
+      let reason = ""
+
+      for (let i = 0; i < groupIds.length; i++) {
+        for (let j = i + 1; j < groupIds.length; j++) {
+          const key = getKey(groupIds[i], groupIds[j])
+          const record = matchRecords.get(key)
+          if (record) {
+            totalConfidence += record.confidence
+            matchCount++
+            if (record.type === "exact") dominantType = "exact"
+            else if (record.type === "substring" && dominantType !== "exact") dominantType = "substring"
+            else if (record.type === "fuzzy" && dominantType !== "exact" && dominantType !== "substring") dominantType = "fuzzy"
+            if (!reason) {
+              reason = record.type === "exact"
+                ? `同名「${record.matchedNames[0]}」`
+                : record.type === "substring"
+                  ? `名称包含「${record.matchedNames[0]}」`
+                  : `名称近似「${record.matchedNames[0]}↔${record.matchedNames[1]}」`
+            }
+          }
+        }
+      }
+
+      groups.push({
+        ids: groupIds,
+        names: groupIds.map(id => aspects.find(a => a.id === id)!.name),
+        reason: reason || "维度名称重叠",
+        matchType: dominantType,
+        confidence: matchCount > 0 ? Math.round((totalConfidence / matchCount) * 100) / 100 : 0,
+      })
+    }
+  }
+
+  return groups.sort((a, b) => b.confidence - a.confidence)
+}
+
+/**
+ * 合并重复维度：保留内容最全的作为主维度，其他内容追加
+ */
+export function mergeDuplicateAspects(
+  aspects: AspectRef[],
+  groups: DuplicateAspectGroup[]
+): AspectRef[] {
+  const mergedIds = new Set<string>()
+  const result: AspectRef[] = []
+
+  for (const group of groups) {
+    const groupAspects = group.ids
+      .map(id => aspects.find(a => a.id === id))
+      .filter((a): a is AspectRef => !!a)
+
+    if (groupAspects.length < 2) continue
+
+    // 保留内容最长的作为主维度
+    const keep = groupAspects.reduce((best, curr) =>
+      (curr.content || "").length > (best.content || "").length ? curr : best
+    )
+
+    // 收集其他维度的补充内容
+    const otherContents = groupAspects
+      .filter(a => a.id !== keep.id && a.content && a.content.trim().length > 0)
+      .map(a => `【${a.name}】\n${a.content}`)
+
+    const mergedContent = otherContents.length > 0
+      ? `${keep.content}\n\n--- 补充内容 ---\n${otherContents.join("\n\n")}`
+      : keep.content
+
+    result.push({
+      id: keep.id,
+      name: keep.name,
+      content: mergedContent,
+    })
+
+    group.ids.forEach(id => mergedIds.add(id))
+  }
+
+  // 保留未合并的维度
+  for (const aspect of aspects) {
+    if (!mergedIds.has(aspect.id)) {
+      result.push(aspect)
+    }
+  }
+
+  return result
+}
+
 /**
  * 智能推荐保留角色：返回字段数量最多的角色 id
  */
