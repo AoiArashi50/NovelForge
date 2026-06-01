@@ -110,7 +110,15 @@ export default function MaterialPool() {
       if (data.worldBibleCreated) parts.push("新建世界观")
       if (data.worldBibleMerged) parts.push("合并世界观")
       const msg = parts.length > 0 ? parts.join("，") : "未提取到新设定"
-      alert(`「${data.materialTitle}」提取完成：${msg}`)
+
+      // 潜在重复提示
+      const dupes = data.potentialDuplicates || []
+      if (dupes.length > 0) {
+        const dupeText = dupes.map(d => `  · ${d.newCharacterName} → 可能与「${d.matchedCharacterName}」重复（${d.reason}）`).join("\n")
+        alert(`「${data.materialTitle}」提取完成：${msg}\n\n⚠️ 发现 ${dupes.length} 个角色可能存在重复，请到设定库确认：\n${dupeText}`)
+      } else {
+        alert(`「${data.materialTitle}」提取完成：${msg}`)
+      }
       utils.lore.character.list.invalidate()
       utils.lore.worldBible.get.invalidate()
     },
@@ -191,7 +199,12 @@ export default function MaterialPool() {
       utils.lore.worldBible.get.invalidate()
       utils.material.list.invalidate()
       if (batchStatus.status === "completed") {
-        alert(`批量提取完成：处理 ${batchStatus.total} 条素材，新增 ${batchStatus.charactersAdded} 个角色，合并 ${batchStatus.charactersMerged} 个角色`)
+        const dupes = batchStatus.potentialDuplicates || []
+        let msg = `批量提取完成：处理 ${batchStatus.total} 条素材，新增 ${batchStatus.charactersAdded} 个角色，合并 ${batchStatus.charactersMerged} 个角色`
+        if (dupes.length > 0) {
+          msg += `\n\n⚠️ 发现 ${dupes.length} 个角色可能存在重复，请到设定库确认。`
+        }
+        alert(msg)
       } else if (batchStatus.status === "failed") {
         alert(`批量提取失败：${batchStatus.errors?.join("\n") || "未知错误"}`)
       }

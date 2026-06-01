@@ -84,16 +84,25 @@ export default function LoreLibrary() {
   const [showMergeModal, setShowMergeModal] = useState(false)
   const [mergeTargetId, setMergeTargetId] = useState<number | null>(null)
   const [selectedMergeIds, setSelectedMergeIds] = useState<Set<number>>(new Set())
+  // 预加载重复检测（不只弹窗时查询，用于角色卡片标记和顶部提示）
   const { data: duplicateData } = trpc.lore.character.findDuplicates.useQuery(
     { seriesId: selectedSeriesId || 0 },
-    { enabled: !!selectedSeriesId && showMergeModal }
+    { enabled: !!selectedSeriesId }
   )
+  // 构建「角色 id → 重复组索引」映射，用于卡片标记
+  const charIdToDuplicateGroup = new Map<number, number>()
+  duplicateData?.groups?.forEach((group, idx) => {
+    group.ids.forEach((id: number) => {
+      if (!charIdToDuplicateGroup.has(id)) charIdToDuplicateGroup.set(id, idx)
+    })
+  })
   const mergeCharacters = trpc.lore.character.merge.useMutation({
-    onSuccess: () => {
+    onSuccess: (data) => {
       utils.lore.character.list.invalidate()
       setShowMergeModal(false)
       setMergeTargetId(null)
       setSelectedMergeIds(new Set())
+      alert(`合并完成！已将 ${data.mergedCount} 个角色合并到「${data.keepName}」。`)
     },
   })
 
@@ -538,6 +547,29 @@ export default function LoreLibrary() {
                         <LoreStatsChart stats={seriesSummary} />
                       </div>
                     </div>
+                    {/* 疑似重复角色提示 */}
+                    {(duplicateData?.duplicateCount ?? 0) > 0 && (
+                      <div className="flex items-center justify-between p-3 rounded-lg bg-red-500/10 border border-red-500/20 mb-3">
+                        <span className="text-sm text-red-400 flex items-center gap-1.5">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+                          发现 <span className="font-semibold">{duplicateData?.duplicateCount}</span> 组疑似重复角色
+                        </span>
+                        <button
+                          onClick={() => {
+                            // 自动选择第一组的推荐保留角色
+                            const firstGroup = duplicateData?.groups[0]
+                            if (firstGroup) {
+                              setMergeTargetId(firstGroup.recommendedKeepId)
+                              setSelectedMergeIds(new Set(firstGroup.ids.filter((id: number) => id !== firstGroup.recommendedKeepId)))
+                            }
+                            setShowMergeModal(true)
+                          }}
+                          className="px-3 py-1.5 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-full text-xs font-medium transition-colors"
+                        >
+                          查看并合并
+                        </button>
+                      </div>
+                    )}
                     {/* 素材提取提示 */}
                     {seriesSummary.materialCount > 0 && (
                       <div className="flex items-center justify-between p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
@@ -700,7 +732,26 @@ export default function LoreLibrary() {
                                 )}
                               </button>
                               <div>
-                                <h3 className="font-serif text-lg font-semibold">{char.name}</h3>
+                                <div className="flex items-center gap-2">
+                                  <h3 className="font-serif text-lg font-semibold">{char.name}</h3>
+                                  {charIdToDuplicateGroup.has(char.id) && (
+                                    <button
+                                      onClick={() => {
+                                        const groupIdx = charIdToDuplicateGroup.get(char.id)!
+                                        const group = duplicateData!.groups[groupIdx]
+                                        // 自动选择推荐的保留角色
+                                        setMergeTargetId(group.recommendedKeepId)
+                                        setSelectedMergeIds(new Set(group.ids.filter((id: number) => id !== group.recommendedKeepId)))
+                                        setShowMergeModal(true)
+                                      }}
+                                      className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 text-xs hover:bg-amber-500/20 transition-colors"
+                                      title="该角色可能与列表中其他角色重复，点击查看"
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+                                      疑似重复
+                                    </button>
+                                  )}
+                                </div>
                                 {char.age && <p className="text-white/50 text-xs font-mono mt-0.5">{char.age}岁</p>}
                               </div>
                             </div>
@@ -1518,52 +1569,148 @@ export default function LoreLibrary() {
       {/* 角色合并 Modal */}
       {showMergeModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="w-full max-w-lg p-6 rounded-2xl bg-[#1F2937] border border-white/10 max-h-[85vh] overflow-y-auto">
+          <div className="w-full max-w-2xl p-6 rounded-2xl bg-[#1F2937] border border-white/10 max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-serif text-lg font-semibold">合并重复角色</h3>
               <button onClick={() => { setShowMergeModal(false); setMergeTargetId(null); setSelectedMergeIds(new Set()); }} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
             </div>
             {duplicateData?.groups && duplicateData.groups.length > 0 ? (
-              <div className="space-y-4">
-                <p className="text-sm text-white/50 mb-3">发现 {duplicateData.groups.length} 组重复角色，选择保留的主角色后合并。</p>
-                {duplicateData.groups.map((group, idx) => (
-                  <div key={idx} className="p-3 rounded-xl bg-white/5 border border-white/10">
-                    <div className="flex items-center gap-2 mb-2">
-                      <span className="text-xs font-mono text-amber-500">{group.reason}</span>
+              <div className="space-y-5">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-white/50">发现 {duplicateData.groups.length} 组疑似重复角色，系统已自动推荐保留字段最全的角色。</p>
+                  <button
+                    onClick={() => {
+                      // 一键智能合并：对每组都自动选择推荐保留角色，其余全部合并
+                      const allKeepIds: number[] = []
+                      const allMergeIds: number[] = []
+                      duplicateData.groups.forEach((g: typeof duplicateData.groups[0]) => {
+                        const keep = g.recommendedKeepId
+                        allKeepIds.push(keep)
+                        g.ids.forEach((id: number) => {
+                          if (id !== keep) allMergeIds.push(id)
+                        })
+                      })
+                      const groupsToMerge = duplicateData.groups
+                      if (confirm(`智能合并将对 ${groupsToMerge.length} 组重复角色分别进行合并，共合并 ${allMergeIds.length} 个角色。此操作不可撤销，是否继续？`)) {
+                        // 串行合并（避免冲突）
+                        let idx = 0
+                        async function mergeNext() {
+                          if (idx >= groupsToMerge.length) {
+                            utils.lore.character.list.invalidate()
+                            setShowMergeModal(false)
+                            setMergeTargetId(null)
+                            setSelectedMergeIds(new Set())
+                            alert("智能合并完成！")
+                            return
+                          }
+                          const g = groupsToMerge[idx]
+                          const keepId = g.recommendedKeepId
+                          const mergeIds = g.ids.filter((id: number) => id !== keepId)
+                          if (mergeIds.length > 0) {
+                            await mergeCharacters.mutateAsync({ keepId, mergeIds })
+                          }
+                          idx++
+                          mergeNext()
+                        }
+                        mergeNext()
+                      }
+                    }}
+                    disabled={mergeCharacters.isPending}
+                    className="px-4 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-full text-xs font-medium transition-colors disabled:opacity-40"
+                  >
+                    {mergeCharacters.isPending ? "合并中..." : "⚡ 一键智能合并"}
+                  </button>
+                </div>
+                {duplicateData.groups.map((group: typeof duplicateData.groups[0], idx: number) => {
+                  const groupChars = characters?.filter(c => group.ids.includes(c.id)) || []
+                  const recommendedId = group.recommendedKeepId
+                  return (
+                    <div key={idx} className="p-4 rounded-xl bg-white/5 border border-white/10">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-mono px-2 py-0.5 rounded ${
+                            group.matchType === "exact" ? "bg-green-500/10 text-green-400" :
+                            group.matchType === "substring" ? "bg-amber-500/10 text-amber-400" :
+                            "bg-red-500/10 text-red-400"
+                          }`}>
+                            {group.matchType === "exact" ? "精确匹配" :
+                             group.matchType === "substring" ? "昵称关联" : "疑似同字"}
+                            · 置信度 {(group.confidence * 100).toFixed(0)}%
+                          </span>
+                          <span className="text-xs text-white/40">{group.reason}</span>
+                        </div>
+                        <button
+                          onClick={() => {
+                            // 自动应用本组推荐
+                            setMergeTargetId(recommendedId)
+                            setSelectedMergeIds(new Set(group.ids.filter((id: number) => id !== recommendedId)))
+                          }}
+                          className="text-xs text-emerald-400 hover:text-emerald-300 transition-colors"
+                        >
+                          应用推荐
+                        </button>
+                      </div>
+                      <div className="space-y-2">
+                        {groupChars.map((char) => {
+                          const isRecommended = char.id === recommendedId
+                          const isTarget = mergeTargetId === char.id
+                          const isSelected = selectedMergeIds.has(char.id)
+                          return (
+                            <div key={char.id} className={`flex items-start gap-3 p-2.5 rounded-lg border ${
+                              isRecommended ? "border-emerald-500/20 bg-emerald-500/5" :
+                              isTarget ? "border-amber-500/20 bg-amber-500/5" :
+                              "border-white/5 bg-white/[0.02]"
+                            }`}>
+                              <div className="flex items-center gap-2 pt-0.5 shrink-0">
+                                <input
+                                  type="radio"
+                                  name={`merge-target-${idx}`}
+                                  checked={isTarget}
+                                  onChange={() => { setMergeTargetId(char.id); setSelectedMergeIds(prev => { const next = new Set(prev); next.delete(char.id); return next; }); }}
+                                  className="w-4 h-4"
+                                  title="设为保留角色"
+                                />
+                                <input
+                                  type="checkbox"
+                                  checked={isSelected}
+                                  disabled={isTarget}
+                                  onChange={(e) => {
+                                    const next = new Set(selectedMergeIds)
+                                    if (e.target.checked) next.add(char.id)
+                                    else next.delete(char.id)
+                                    setSelectedMergeIds(next)
+                                  }}
+                                  className="w-4 h-4"
+                                  title="合并此角色"
+                                />
+                              </div>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className={`text-sm font-medium ${isTarget ? "text-amber-400" : "text-white/80"}`}>
+                                    {char.name}
+                                    {isRecommended && <span className="ml-1 text-emerald-400 text-xs">⭐ 推荐保留</span>}
+                                    {isTarget && !isRecommended && <span className="ml-1 text-amber-400 text-xs">(保留)</span>}
+                                  </span>
+                                  {(char.aliases as string[] || []).length > 0 && (
+                                    <span className="text-xs text-white/30 font-mono">别名: {(char.aliases as string[]).join(", ")}</span>
+                                  )}
+                                </div>
+                                <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-white/40">
+                                  {char.age && <span>年龄: {char.age}</span>}
+                                  {(char.personalityTraits as string[] || []).length > 0 && <span>性格: {(char.personalityTraits as string[]).slice(0, 3).join(", ")}{(char.personalityTraits as string[]).length > 3 && "..."}</span>}
+                                  {char.coreMotivations && <span>动机: {char.coreMotivations.slice(0, 30)}{char.coreMotivations.length > 30 && "..."}</span>}
+                                  {Object.keys(char.relationships as Record<string, unknown> || {}).length > 0 && <span>关系: {Object.keys(char.relationships as Record<string, unknown>).length} 条</span>}
+                                  {char.speechPatterns && <span>语言风格: ✓</span>}
+                                  {char.canonicalArcSummary && <span>故事线: ✓</span>}
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
                     </div>
-                    <div className="space-y-1.5">
-                      {group.names.map((name, i) => {
-                        const charId = group.ids[i]
-                        const isTarget = mergeTargetId === charId
-                        const isSelected = selectedMergeIds.has(charId)
-                        return (
-                          <div key={charId} className="flex items-center gap-2">
-                            <input
-                              type="radio"
-                              name={`merge-target-${idx}`}
-                              checked={isTarget}
-                              onChange={() => { setMergeTargetId(charId); setSelectedMergeIds(prev => { const next = new Set(prev); next.delete(charId); return next; }); }}
-                              className="w-4 h-4 shrink-0"
-                            />
-                            <input
-                              type="checkbox"
-                              checked={isSelected}
-                              disabled={isTarget}
-                              onChange={(e) => {
-                                const next = new Set(selectedMergeIds)
-                                if (e.target.checked) next.add(charId)
-                                else next.delete(charId)
-                                setSelectedMergeIds(next)
-                              }}
-                              className="w-4 h-4 shrink-0"
-                            />
-                            <span className={`text-sm ${isTarget ? 'text-amber-400 font-medium' : 'text-white/70'}`}>{name} {isTarget && '(保留)'}</span>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  </div>
-                ))}
+                  )
+                })}
                 <button
                   onClick={() => {
                     if (!mergeTargetId || selectedMergeIds.size === 0) {
