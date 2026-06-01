@@ -271,7 +271,7 @@ ${combined}
         const victims = await db
           .select()
           .from(characterCards)
-          .where(sql`${characterCards.id} IN (${input.mergeIds.join(",")})`)
+          .where(inArray(characterCards.id, input.mergeIds))
 
         if (victims.length === 0) throw new Error("没有可合并的角色")
 
@@ -310,7 +310,7 @@ ${combined}
           .where(eq(characterCards.id, keep.id))
           .returning()
 
-        await db.delete(characterCards).where(sql`${characterCards.id} IN (${input.mergeIds.join(",")})`)
+        await db.delete(characterCards).where(inArray(characterCards.id, input.mergeIds))
 
         return {
           keepId: keep.id,
