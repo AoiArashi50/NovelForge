@@ -107,6 +107,29 @@ export default function LoreLibrary() {
     },
   })
 
+  // 世界观维度重复检测与合并
+  const [showAspectMergeModal, setShowAspectMergeModal] = useState(false)
+  const [selectedAspectMergeGroupIds, setSelectedAspectMergeGroupIds] = useState<Set<string>>(new Set())
+  const { data: aspectDuplicateData } = trpc.lore.worldBible.findDuplicateAspects.useQuery(
+    { seriesId: selectedSeriesId || 0 },
+    { enabled: !!selectedSeriesId }
+  )
+  // 构建「维度 id → 重复组索引」映射，用于卡片标记
+  const aspectIdToDuplicateGroup = new Map<string, number>()
+  aspectDuplicateData?.groups?.forEach((group, idx) => {
+    group.ids.forEach((id: string) => {
+      if (!aspectIdToDuplicateGroup.has(id)) aspectIdToDuplicateGroup.set(id, idx)
+    })
+  })
+  const mergeAspectsMutation = trpc.lore.worldBible.mergeAspects.useMutation({
+    onSuccess: (data) => {
+      utils.lore.worldBible.get.invalidate({ seriesId: selectedSeriesId || 0 })
+      setShowAspectMergeModal(false)
+      setSelectedAspectMergeGroupIds(new Set())
+      alert(`合并完成！已合并 ${data.mergedCount} 个重复维度，剩余 ${data.remainingAspects} 个维度。`)
+    },
+  })
+
   const createSeries = trpc.lore.series.create.useMutation({
     onSuccess: () => {
       utils.lore.series.list.invalidate()
@@ -589,6 +612,24 @@ export default function LoreLibrary() {
                         </button>
                       </div>
                     )}
+                    {/* 疑似重复世界观维度提示 */}
+                    {(aspectDuplicateData?.duplicateCount ?? 0) > 0 && (
+                      <div className="flex items-center justify-between p-3 rounded-lg bg-amber-500/10 border border-amber-500/20 mb-3">
+                        <span className="text-sm text-amber-400 flex items-center gap-1.5">
+                          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+                          发现 <span className="font-semibold">{aspectDuplicateData?.duplicateCount}</span> 组疑似重复世界观维度
+                        </span>
+                        <button
+                          onClick={() => {
+                            setShowAspectMergeModal(true)
+                            setSelectedAspectMergeGroupIds(new Set())
+                          }}
+                          className="px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 rounded-full text-xs font-medium transition-colors"
+                        >
+                          查看并合并
+                        </button>
+                      </div>
+                    )}
                     {/* 素材提取提示 */}
                     {seriesSummary.materialCount > 0 && (
                       <div className="flex items-center justify-between p-3 rounded-lg bg-amber-500/10 border border-amber-500/20">
@@ -873,12 +914,22 @@ export default function LoreLibrary() {
                           从素材提取
                         </button>
                         {!isEditingWorldBible && worldBible && (
-                          <button
-                            onClick={() => setIsEditingWorldBible(true)}
-                            className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors"
-                          >
-                            <Edit className="w-3.5 h-3.5 inline mr-1" /> 编辑
-                          </button>
+                          <>
+                            <button
+                              onClick={() => { setShowAspectMergeModal(true); setSelectedAspectMergeGroupIds(new Set()); }}
+                              disabled={!aspects || aspects.length < 2}
+                              className="flex items-center gap-2 px-4 py-2 bg-white/5 hover:bg-white/10 disabled:opacity-30 rounded-full text-sm transition-colors text-white/60"
+                            >
+                              <Sparkles className="w-3.5 h-3.5" />
+                              检测重复
+                            </button>
+                            <button
+                              onClick={() => setIsEditingWorldBible(true)}
+                              className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm transition-colors"
+                            >
+                              <Edit className="w-3.5 h-3.5 inline mr-1" /> 编辑
+                            </button>
+                          </>
                         )}
                         {!isEditingWorldBible && !worldBible && (
                           <button
@@ -1004,7 +1055,22 @@ export default function LoreLibrary() {
                           <div className="space-y-3">
                             {aspects.map((aspect) => (
                               <div key={aspect.id} className="p-4 rounded-xl bg-white/[0.03] border border-white/10">
-                                <h4 className="text-sm font-medium text-amber-400 mb-2">{aspect.name}</h4>
+                                <div className="flex items-center gap-2 mb-2">
+                                  <h4 className="text-sm font-medium text-amber-400">{aspect.name}</h4>
+                                  {aspectIdToDuplicateGroup.has(aspect.id) && (
+                                    <button
+                                      onClick={() => {
+                                        setShowAspectMergeModal(true)
+                                        setSelectedAspectMergeGroupIds(new Set())
+                                      }}
+                                      className="flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 text-xs hover:bg-amber-500/20 transition-colors"
+                                      title="该维度可能与列表中其他维度重复，点击查看"
+                                    >
+                                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>
+                                      疑似重复
+                                    </button>
+                                  )}
+                                </div>
                                 <div className="text-sm text-white/70 whitespace-pre-wrap">{aspect.content}</div>
                               </div>
                             ))}
@@ -1848,6 +1914,113 @@ export default function LoreLibrary() {
               <div className="text-center py-8 text-white/40">
                 <CheckCircle className="w-10 h-10 mx-auto mb-3 opacity-40" />
                 <p className="text-sm">{duplicateData ? '未发现重复角色' : '正在检测...'}</p>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 世界观维度合并 Modal */}
+      {showAspectMergeModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-2xl p-6 rounded-2xl bg-[#1F2937] border border-white/10 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-serif text-lg font-semibold">合并重复世界观维度</h3>
+              <button onClick={() => { setShowAspectMergeModal(false); setSelectedAspectMergeGroupIds(new Set()); }} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+            </div>
+            {aspectDuplicateData?.groups && aspectDuplicateData.groups.length > 0 ? (
+              <div className="space-y-5">
+                <div className="flex items-center justify-between">
+                  <p className="text-sm text-white/50">发现 {aspectDuplicateData.groups.length} 组疑似重复维度，系统将自动保留内容最全的维度，其余内容追加为补充。系统会自动保留内容最全的维度，其余内容追加为补充。</p>
+                  <button
+                    onClick={() => {
+                      if (confirm(`智能合并将对 ${aspectDuplicateData.groups.length} 组重复维度进行合并。此操作不可撤销，是否继续？`)) {
+                        const allGroupIds = aspectDuplicateData.groups.flatMap((g: typeof aspectDuplicateData.groups[0]) => g.ids)
+                        mergeAspectsMutation.mutate({
+                          seriesId: selectedSeriesId!,
+                          groupIds: allGroupIds,
+                        })
+                      }
+                    }}
+                    disabled={mergeAspectsMutation.isPending}
+                    className="px-4 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded-full text-xs font-medium transition-colors disabled:opacity-40 shrink-0 ml-4"
+                  >
+                    {mergeAspectsMutation.isPending ? "合并中..." : "⚡ 一键智能合并"}
+                  </button>
+                </div>
+                {aspectDuplicateData.groups.map((group: typeof aspectDuplicateData.groups[0], idx: number) => {
+                  const groupAspects = aspects.filter(a => group.ids.includes(a.id))
+                  // 找出内容最长的作为主维度
+                  const keepAspect = groupAspects.reduce((best, curr) =>
+                    (curr.content || "").length > (best.content || "").length ? curr : best
+                  , groupAspects[0])
+                  return (
+                    <div key={idx} className="p-4 rounded-xl bg-white/5 border border-white/10">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <span className={`text-xs font-mono px-2 py-0.5 rounded ${
+                            group.matchType === "exact" ? "bg-green-500/10 text-green-400" :
+                            group.matchType === "substring" ? "bg-amber-500/10 text-amber-400" :
+                            "bg-red-500/10 text-red-400"
+                          }`}>
+                            {group.matchType === "exact" ? "精确匹配" :
+                             group.matchType === "substring" ? "名称包含" : "名称近似"}
+                            · 置信度 {(group.confidence * 100).toFixed(0)}%
+                          </span>
+                          <span className="text-xs text-white/40">{group.reason}</span>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        {groupAspects.map((aspect) => {
+                          const isKeep = aspect.id === keepAspect?.id
+                          return (
+                            <div key={aspect.id} className={`flex items-start gap-3 p-2.5 rounded-lg border ${
+                              isKeep ? "border-emerald-500/20 bg-emerald-500/5" : "border-white/5 bg-white/[0.02]"
+                            }`}>
+                              <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1">
+                                  <span className={`text-sm font-medium ${isKeep ? "text-emerald-400" : "text-white/80"}`}>
+                                    {aspect.name}
+                                    {isKeep && <span className="ml-1 text-emerald-400 text-xs">⭐ 保留（内容最长）</span>}
+                                  </span>
+                                </div>
+                                <p className="text-xs text-white/40 line-clamp-2">{aspect.content}</p>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  )
+                })}
+                <button
+                  onClick={() => {
+                    if (selectedAspectMergeGroupIds.size === 0) {
+                      alert("请至少选择一组要合并的重复维度")
+                      return
+                    }
+                    const selectedGroups = aspectDuplicateData.groups.filter((g: typeof aspectDuplicateData.groups[0]) =>
+                      g.ids.some((id: string) => selectedAspectMergeGroupIds.has(id))
+                    )
+                    const allGroupIds = selectedGroups.flatMap((g: typeof aspectDuplicateData.groups[0]) => g.ids)
+                    if (confirm(`确定合并选中的 ${selectedGroups.length} 组重复维度？此操作不可撤销。`)) {
+                      mergeAspectsMutation.mutate({
+                        seriesId: selectedSeriesId!,
+                        groupIds: allGroupIds,
+                      })
+                    }
+                  }}
+                  disabled={mergeAspectsMutation.isPending}
+                  className="w-full px-5 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-[#111827] rounded-full font-medium text-sm transition-colors"
+                >
+                  {mergeAspectsMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin inline mr-2" /> : null}
+                  确认合并选中组
+                </button>
+              </div>
+            ) : (
+              <div className="text-center py-8 text-white/40">
+                <CheckCircle className="w-10 h-10 mx-auto mb-3 opacity-40" />
+                <p className="text-sm">{aspectDuplicateData ? "未发现重复世界观维度" : "正在检测..."}</p>
               </div>
             )}
           </div>
