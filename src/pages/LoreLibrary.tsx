@@ -1,4 +1,5 @@
 import { trpc } from "@/providers/trpc"
+import { useToast } from "@/providers/toast"
 import { useState, useEffect } from "react"
 import { Controller } from "react-hook-form"
 import { useCharacterForm, formDataToCharacterPayload } from "@/hooks/useCharacterForm"
@@ -15,6 +16,7 @@ import RichTextEditor from "@/components/RichTextEditor"
 
 export default function LoreLibrary() {
   const utils = trpc.useUtils()
+  const toast = useToast()
   const { data: seriesList } = trpc.lore.series.list.useQuery()
   const [selectedSeriesId, setSelectedSeriesId] = useState<number | null>(null)
   const [activeTab, setActiveTab] = useState<"characters" | "world" | "canon" | "tropes">("characters")
@@ -103,7 +105,7 @@ export default function LoreLibrary() {
       setShowMergeModal(false)
       setMergeTargetId(null)
       setSelectedMergeIds(new Set())
-      alert(`合并完成！已将 ${data.mergedCount} 个角色合并到「${data.keepName}」。`)
+      toast.success(`合并完成！已将 ${data.mergedCount} 个角色合并到「${data.keepName}」。`)
     },
   })
 
@@ -126,7 +128,7 @@ export default function LoreLibrary() {
       utils.lore.worldBible.get.invalidate({ seriesId: selectedSeriesId || 0 })
       setShowAspectMergeModal(false)
       setSelectedAspectMergeGroupIds(new Set())
-      alert(`合并完成！已合并 ${data.mergedCount} 个重复维度，剩余 ${data.remainingAspects} 个维度。`)
+      toast.success(`合并完成！已合并 ${data.mergedCount} 个重复维度，剩余 ${data.remainingAspects} 个维度。`)
     },
   })
 
@@ -169,9 +171,9 @@ export default function LoreLibrary() {
   const extractStyleProfile = trpc.lore.character.extractStyleProfile.useMutation({
     onSuccess: (data) => {
       utils.lore.character.list.invalidate()
-      alert(`风格提炼完成！\n\n高频用词: ${(data.vocabulary as string[] || []).join(", ")}\n情感基调: ${data.emotionalTone}\n对话风格: ${data.dialogueStyle}`)
+      toast.success(`风格提炼完成！高频用词: ${(data.vocabulary as string[] || []).join(", ")}；情感基调: ${data.emotionalTone}；对话风格: ${data.dialogueStyle}`)
     },
-    onError: (err) => alert(err.message),
+    onError: (err) => toast.error(err.message),
   })
 
   const { data: characters } = trpc.lore.character.list.useQuery(
@@ -222,7 +224,7 @@ export default function LoreLibrary() {
       setBatchTaskId(data.taskId)
     },
     onError: (err) => {
-      alert(`补全启动失败：${err.message}`)
+      toast.error(`补全启动失败：${err.message}`)
       setBatchTaskId(null)
     },
   })
@@ -244,9 +246,9 @@ export default function LoreLibrary() {
       utils.lore.worldBible.get.invalidate()
       utils.lore.series.summary.invalidate({ seriesId: selectedSeriesId || 0 })
       if (batchStatus.status === "completed") {
-        alert(`一键补全完成：处理 ${batchStatus.total} 条素材，新增 ${batchStatus.charactersAdded} 个角色，合并 ${batchStatus.charactersMerged} 个角色`)
+        toast.success(`一键补全完成：处理 ${batchStatus.total} 条素材，新增 ${batchStatus.charactersAdded} 个角色，合并 ${batchStatus.charactersMerged} 个角色`)
       } else if (batchStatus.status === "failed") {
-        alert(`补全失败：${batchStatus.errors?.join("\n") || "未知错误"}`)
+        toast.error(`补全失败：${batchStatus.errors?.join("\n") || "未知错误"}`)
       }
       setBatchTaskId(null)
     }
@@ -641,7 +643,7 @@ export default function LoreLibrary() {
                             if (!selectedSeriesId) return
                             const ids = seriesMaterials?.map(m => m.id) || []
                             if (ids.length === 0) {
-                              alert("该系列下暂无素材")
+                              toast.warning("该系列下暂无素材")
                               return
                             }
                             if (confirm(`确定一键提取该系列下 ${ids.length} 条素材的设定？同名角色将自动合并。`)) {
@@ -1777,7 +1779,7 @@ export default function LoreLibrary() {
                             setShowMergeModal(false)
                             setMergeTargetId(null)
                             setSelectedMergeIds(new Set())
-                            alert("智能合并完成！")
+                            toast.success("智能合并完成！")
                             return
                           }
                           const g = groupsToMerge[idx]
@@ -1891,12 +1893,12 @@ export default function LoreLibrary() {
                 <button
                   onClick={() => {
                     if (!mergeTargetId || selectedMergeIds.size === 0) {
-                      alert("请选择保留的主角色和至少一个要合并的角色")
+                      toast.warning("请选择保留的主角色和至少一个要合并的角色")
                       return
                     }
                     const mergeIds = Array.from(selectedMergeIds).filter(id => id !== mergeTargetId)
                     if (mergeIds.length === 0) {
-                      alert("至少选择一个非保留角色进行合并")
+                      toast.warning("至少选择一个非保留角色进行合并")
                       return
                     }
                     if (confirm(`确定将 ${mergeIds.length} 个角色合并到「${characters?.find(c => c.id === mergeTargetId)?.name}」？此操作不可撤销。`)) {
@@ -1996,7 +1998,7 @@ export default function LoreLibrary() {
                 <button
                   onClick={() => {
                     if (selectedAspectMergeGroupIds.size === 0) {
-                      alert("请至少选择一组要合并的重复维度")
+                      toast.warning("请至少选择一组要合并的重复维度")
                       return
                     }
                     const selectedGroups = aspectDuplicateData.groups.filter((g: typeof aspectDuplicateData.groups[0]) =>

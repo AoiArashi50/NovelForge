@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from "react"
 import { useDropzone } from "react-dropzone"
 import { trpc } from "@/providers/trpc"
+import { useToast } from "@/providers/toast"
 import NavBar from "@/components/NavBar"
 import Select from "@/components/Select"
 import Modal from "@/components/Modal"
@@ -37,6 +38,7 @@ function splitTextIntoParagraphs(text: string): string[] {
 
 export default function MaterialPool() {
   const utils = trpc.useUtils()
+  const toast = useToast()
   const { data: materialList, isLoading } = trpc.material.list.useQuery(undefined, {
     refetchInterval: (query) => {
       const data = query.state.data as { status: string }[] | undefined
@@ -89,14 +91,14 @@ export default function MaterialPool() {
 
   const importToNovelMutation = trpc.novel.importFromMaterial.useMutation({
     onSuccess: () => {
-      alert("已成功导入小说管理")
+      toast.success("已成功导入小说管理")
       utils.novel.list.invalidate()
     },
   })
 
   const importMaterialsMutation = trpc.novel.importMaterials.useMutation({
     onSuccess: (data) => {
-      alert(`成功导入 ${data.imported} 本小说到小说管理`)
+      toast.success(`成功导入 ${data.imported} 本小说到小说管理`)
       utils.novel.list.invalidate()
       setSelectedMaterialIds([])
     },
@@ -115,15 +117,15 @@ export default function MaterialPool() {
       const dupes = data.potentialDuplicates || []
       if (dupes.length > 0) {
         const dupeText = dupes.map(d => `  · ${d.newCharacterName} → 可能与「${d.matchedCharacterName}」重复（${d.reason}）`).join("\n")
-        alert(`「${data.materialTitle}」提取完成：${msg}\n\n⚠️ 发现 ${dupes.length} 个角色可能存在重复，请到设定库确认：\n${dupeText}`)
+        toast.warning(`「${data.materialTitle}」提取完成：${msg}。发现 ${dupes.length} 个角色可能存在重复，请到设定库确认：${dupeText}`)
       } else {
-        alert(`「${data.materialTitle}」提取完成：${msg}`)
+        toast.success(`「${data.materialTitle}」提取完成：${msg}`)
       }
       utils.lore.character.list.invalidate()
       utils.lore.worldBible.get.invalidate()
     },
     onError: (err) => {
-      alert(`提取失败：${err.message}`)
+      toast.error(`提取失败：${err.message}`)
     },
   })
 
@@ -132,7 +134,7 @@ export default function MaterialPool() {
       setBatchTaskId(data.taskId)
     },
     onError: (err) => {
-      alert(`批量提取启动失败：${err.message}`)
+      toast.error(`批量提取启动失败：${err.message}`)
       setBatchTaskId(null)
     },
   })
@@ -204,9 +206,9 @@ export default function MaterialPool() {
         if (dupes.length > 0) {
           msg += `\n\n⚠️ 发现 ${dupes.length} 个角色可能存在重复，请到设定库确认。`
         }
-        alert(msg)
+        toast.success(msg)
       } else if (batchStatus.status === "failed") {
-        alert(`批量提取失败：${batchStatus.errors?.join("\n") || "未知错误"}`)
+        toast.error(`批量提取失败：${batchStatus.errors?.join("\n") || "未知错误"}`)
       }
       setBatchTaskId(null)
       setSelectedMaterialIds([])
@@ -232,7 +234,7 @@ export default function MaterialPool() {
   const handleFileSelect = async (file: File, target: "content" | "source" | "translated") => {
     const ext = file.name.split(".").pop()?.toLowerCase()
     if (!ext || !["txt", "docx"].includes(ext)) {
-      alert("不支持的文件格式，仅支持 .txt 和 .docx")
+      toast.error("不支持的文件格式，仅支持 .txt 和 .docx")
       return
     }
 
@@ -259,10 +261,10 @@ export default function MaterialPool() {
         if (target === "source") { setSourceText(result.text); setAlignedPairs(null) }
         if (target === "translated") { setTranslatedText(result.text); setAlignedPairs(null) }
       } catch (err) {
-        alert(err instanceof Error ? err.message : "文件解析失败")
+        toast.error(err instanceof Error ? err.message : "文件解析失败")
       }
     }
-    reader.onerror = () => alert("文件读取失败")
+    reader.onerror = () => toast.error("文件读取失败")
     reader.readAsDataURL(file)
   }
 
@@ -1125,7 +1127,7 @@ export default function MaterialPool() {
                     <button
                       onClick={() => {
                         if (!extractTargetSeriesId) {
-                          alert("请选择归属系列")
+                          toast.warning("请选择归属系列")
                           return
                         }
                         // 保存选中的角色
@@ -1164,7 +1166,7 @@ export default function MaterialPool() {
                         setExtractTargetSeriesId(null)
                         setSelectedCharIndexes(new Set())
                         setSaveWorldBible(true)
-                        alert("设定已保存到设定库")
+                        toast.success("设定已保存到设定库")
                       }}
                       disabled={createCharacterMutation.isPending || createWorldBibleMutation.isPending}
                       className="px-6 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium text-sm"
@@ -1203,7 +1205,7 @@ export default function MaterialPool() {
                 <button
                   onClick={() => {
                     if (!autoExtractSeriesId || !autoExtractMaterialId) {
-                      alert("请选择目标系列")
+                      toast.warning("请选择目标系列")
                       return
                     }
                     autoExtractLoreMutation.mutate({
@@ -1276,11 +1278,11 @@ export default function MaterialPool() {
                 <button
                   onClick={() => {
                     if (!batchExtractSeriesId) {
-                      alert("请选择目标系列")
+                      toast.warning("请选择目标系列")
                       return
                     }
                     if (selectedMaterialIds.length === 0) {
-                      alert("请先选择素材")
+                      toast.warning("请先选择素材")
                       return
                     }
                     batchAutoExtractMutation.mutate({

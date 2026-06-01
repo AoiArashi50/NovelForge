@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router"
 import { trpc } from "@/providers/trpc"
+import { useToast } from "@/providers/toast"
 import { useState, useMemo, useCallback } from "react"
 import { useDropzone } from "react-dropzone"
 import NavBar from "@/components/NavBar"
@@ -16,6 +17,7 @@ type NovelItem = RouterOutput["novel"]["list"][number]
 export default function NovelManager() {
   const navigate = useNavigate()
   const utils = trpc.useUtils()
+  const toast = useToast()
   const { data: novels, isLoading } = trpc.novel.list.useQuery()
   const { data: allTags } = trpc.tag.list.useQuery()
   const { data: tagMap } = trpc.novel.tagMap.useQuery()
@@ -128,7 +130,7 @@ export default function NovelManager() {
       setAuthor("")
       setFiles([])
     } catch (err) {
-      alert("上传失败: " + String(err))
+      toast.error("上传失败: " + String(err))
     } finally {
       setUploading(false)
       setUploadProgress({ current: 0, total: 0 })

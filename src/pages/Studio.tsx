@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react"
 import { useParams } from "react-router"
 import { trpc } from "@/providers/trpc"
+import { useToast } from "@/providers/toast"
 import NavBar from "@/components/NavBar"
 import {
   PenTool, Sparkles, Save, Download,
@@ -155,13 +156,15 @@ export default function Studio() {
   const continueMutation = trpc.generate.continue.useMutation()
   const regenerateMutation = trpc.generate.regenerate.useMutation()
 
+  const { success: toastSuccess } = useToast()
+
   const saveAsStyleSampleMutation = trpc.material.saveAsStyleSample.useMutation({
     onSuccess: () => {
       utils.material.list.invalidate()
       setShowStyleSampleModal(false)
       setStyleSampleCharacterTag("")
       setStyleSampleSceneTag("")
-      alert("已保存为风格样本")
+      toastSuccess("已保存为风格样本")
     },
   })
 

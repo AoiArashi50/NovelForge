@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import Lenis from 'lenis'
 import './index.css'
 import { TRPCProvider } from "@/providers/trpc"
+import { ToastProvider } from "@/providers/toast"
 import App from './App.tsx'
 
 // 平滑滚动 Hook
@@ -29,9 +30,11 @@ function SmoothScrollProvider({ children }: { children: React.ReactNode }) {
 createRoot(document.getElementById('root')!).render(
   <BrowserRouter>
     <TRPCProvider>
-      <SmoothScrollProvider>
-        <App />
-      </SmoothScrollProvider>
+      <ToastProvider>
+        <SmoothScrollProvider>
+          <App />
+        </SmoothScrollProvider>
+      </ToastProvider>
     </TRPCProvider>
   </BrowserRouter>,
 )
