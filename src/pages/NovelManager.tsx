@@ -31,12 +31,7 @@ export default function NovelManager() {
   const updateMutation = trpc.novel.update.useMutation({
     onSuccess: () => utils.novel.list.invalidate(),
   })
-  const translateMutation = trpc.translate.start.useMutation({
-    onSuccess: () => {
-      utils.novel.list.invalidate()
-      utils.chapter.list.invalidate()
-    },
-  })
+  const translateChapterMutation = trpc.translate.chapter.useMutation()
   const indexMutation = trpc.rag.indexNovel.useMutation()
   const assignTagMutation = trpc.tag.assign.useMutation({
     onSuccess: () => utils.novel.tags.invalidate(),
@@ -61,6 +56,14 @@ export default function NovelManager() {
   const [translatePrompt, setTranslatePrompt] = useState("")
   const [translateRagCalls, setTranslateRagCalls] = useState<Array<{ type: string; content: string; score?: number; sourceType?: string }> | null>(null)
   const [showRagPanel, setShowRagPanel] = useState(false)
+
+  // 逐章翻译进度
+  const [translateProgress, setTranslateProgress] = useState<{
+    current: number
+    total: number
+    chapterTitle: string
+    isTranslating: boolean
+  } | null>(null)
 
   const [exportNovel, setExportNovel] = useState<NovelItem | null>(null)
   const [exportFormat, setExportFormat] = useState<"pure" | "parallel">("pure")
@@ -148,16 +151,69 @@ export default function NovelManager() {
 
   const handleTranslate = async () => {
     if (!translateNovel) return
-    const result = await translateMutation.mutateAsync({
-      novelId: translateNovel.id,
-      style: translateStyle,
-      userPrompt: translatePrompt.trim() || undefined,
-    })
-    setTranslateNovel(null)
-    setTranslatePrompt("")
-    if (result.ragCalls && result.ragCalls.length > 0) {
-      setTranslateRagCalls(result.ragCalls)
-      setShowRagPanel(true)
+
+    // 检查是否绑定了系列
+    if (!translateNovel.seriesId) {
+      toast.warning("该小说尚未绑定系列，翻译时将无法复用世界观素材。建议先绑定系列后再翻译。")
+      // 继续翻译，不阻断
+    }
+
+    // 获取章节列表
+    const chapterList = await utils.chapter.list.fetch({ novelId: translateNovel.id })
+    if (!chapterList || chapterList.length === 0) {
+      toast.error("该小说暂无章节内容")
+      return
+    }
+
+    setTranslateProgress({ current: 0, total: chapterList.length, chapterTitle: "", isTranslating: true })
+    const allRagCalls: typeof translateRagCalls = []
+
+    try {
+      for (let i = 0; i < chapterList.length; i++) {
+        const ch = chapterList[i]
+        setTranslateProgress({
+          current: i,
+          total: chapterList.length,
+          chapterTitle: ch.title || `第${ch.chapterNumber}章`,
+          isTranslating: true,
+        })
+
+        const result = await translateChapterMutation.mutateAsync({
+          novelId: translateNovel.id,
+          chapterId: ch.id,
+          style: translateStyle,
+          userPrompt: translatePrompt.trim() || undefined,
+        })
+
+        if (result.ragCalls && result.ragCalls.length > 0) {
+          allRagCalls?.push(...result.ragCalls)
+        }
+      }
+
+      // 更新小说状态为已翻译
+      await utils.novel.list.invalidate()
+
+      setTranslateProgress({ current: chapterList.length, total: chapterList.length, chapterTitle: "", isTranslating: false })
+      toast.success(`《${translateNovel.title}》翻译完成，共 ${chapterList.length} 章`)
+
+      setTranslateNovel(null)
+      setTranslatePrompt("")
+
+      if (allRagCalls && allRagCalls.length > 0) {
+        // 去重
+        const seen = new Set<string>()
+        const deduped = allRagCalls.filter(c => {
+          const key = c.type + "|" + c.content.slice(0, 80)
+          if (seen.has(key)) return false
+          seen.add(key)
+          return true
+        })
+        setTranslateRagCalls(deduped)
+        setShowRagPanel(true)
+      }
+    } catch (err) {
+      toast.error("翻译中断: " + String(err))
+      setTranslateProgress(prev => prev ? { ...prev, isTranslating: false } : null)
     }
   }
 
@@ -504,7 +560,7 @@ export default function NovelManager() {
                 <Sparkles className="w-5 h-5 text-amber-500" />
                 <h3 className="font-serif text-lg font-semibold">开始翻译</h3>
               </div>
-              <button onClick={() => setTranslateNovel(null)} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+              <button onClick={() => { setTranslateNovel(null); setTranslateProgress(null); }} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
             </div>
             <p className="text-white/70 text-sm mb-4 font-mono">《{translateNovel.title}》</p>
 
@@ -542,14 +598,45 @@ export default function NovelManager() {
               </div>
             </div>
 
-            <button
-              onClick={handleTranslate}
-              disabled={translateMutation.isPending}
-              className="w-full py-3 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium transition-colors flex items-center justify-center gap-2"
-            >
-              {translateMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-              {translateMutation.isPending ? "翻译中..." : "开始翻译"}
-            </button>
+            {translateProgress?.isTranslating ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-white/70 font-mono">
+                    {translateProgress.current > 0
+                      ? `已完成 ${translateProgress.current}/${translateProgress.total} 章`
+                      : `准备翻译 ${translateProgress.total} 章...`}
+                  </span>
+                  <span className="text-amber-400 text-xs font-mono">
+                    {translateProgress.chapterTitle}
+                  </span>
+                </div>
+                <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                    style={{
+                      width: `${translateProgress.total > 0 ? (translateProgress.current / translateProgress.total) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+                <div className="flex items-center gap-2 text-amber-400 text-sm">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>正在翻译 {translateProgress.chapterTitle || "..."}</span>
+                </div>
+              </div>
+            ) : (
+              <button
+                onClick={handleTranslate}
+                disabled={translateChapterMutation.isPending}
+                className="w-full py-3 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium transition-colors flex items-center justify-center gap-2"
+              >
+                {translateChapterMutation.isPending ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : (
+                  <Play className="w-4 h-4" />
+                )}
+                {translateChapterMutation.isPending ? "翻译中..." : "开始翻译"}
+              </button>
+            )}
           </div>
         </div>
       )}
