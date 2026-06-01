@@ -211,3 +211,31 @@ export const plotTropes = pgTable("plot_tropes", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow(),
 })
+
+// 桥段-角色关联（桥段的典型参与角色）
+export const tropeCharacterLinks = pgTable("trope_character_links", {
+  id: serial("id").primaryKey(),
+  tropeId: integer("trope_id").notNull(),
+  characterId: integer("character_id").notNull(),
+  role: varchar("role", { length: 50 }), // protagonist, antagonist, trigger, victim 等
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+})
+
+// 桥段-正史关联（桥段发生的正史背景）
+export const tropeCanonLinks = pgTable("trope_canon_links", {
+  id: serial("id").primaryKey(),
+  tropeId: integer("trope_id").notNull(),
+  canonEventId: integer("canon_event_id").notNull(),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+})
+
+// RAG 效果反馈闭环
+export const ragFeedback = pgTable("rag_feedback", {
+  id: serial("id").primaryKey(),
+  generationId: integer("generation_id").notNull(),
+  chunkId: integer("chunk_id"),
+  content: text("content"),
+  wasHelpful: boolean("was_helpful"),
+  similarityScore: real("similarity_score"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+})
