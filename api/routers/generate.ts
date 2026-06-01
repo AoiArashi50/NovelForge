@@ -672,17 +672,35 @@ export const generateRouter = createRouter({
       let autoTitle: string | undefined
       if (!input.title || input.title.trim() === "") {
         try {
-          const titlePrompt = `请根据以下创作 brief 和生成内容的摘要，提炼一个简洁、吸引人的小说标题（不超过 15 个字）。只返回标题文本，不要有任何解释或标点包裹。
+          const titlePrompt = `请根据以下创作 brief 和生成内容的摘要，提炼一个简洁、吸引人的小说标题。
+
+要求：
+1. 标题长度不超过 15 个字
+2. 只返回标题文本本身，不要有任何解释、前缀、后缀或标点符号包裹
+3. 不要返回引号、书名号等任何包裹符号
+4. 不要返回"标题：""小说标题："等前缀
 
 创作方向：${input.brief.slice(0, 200)}
 
 内容摘要：${fullContent.slice(0, 500)}`
           autoTitle = await chatCompletion({
-            messages: [{ role: "user", content: titlePrompt }],
+            messages: [
+              { role: "system", content: "你是一个专业的小说标题生成助手。你的唯一任务是返回一个纯文本标题，不添加任何解释、前缀或包裹符号。" },
+              { role: "user", content: titlePrompt },
+            ],
             temperature: 0.5,
-            maxTokens: 100,
+            maxTokens: 60,
           })
-          autoTitle = autoTitle.trim().replace(/^["'""'']|["'""'']$/g, "").slice(0, 30)
+          // 清理：去掉各种引号、书名号和常见前缀后缀
+          autoTitle = autoTitle
+            .trim()
+            .replace(/^(标题[:：]?\s*|小说标题[:：]?\s*|书名[:：]?\s*)/i, "")
+            .replace(/[""''""《》「」『』]/g, "")
+            .slice(0, 30)
+          // 如果清理后为空，则放弃
+          if (!autoTitle || autoTitle.trim().length === 0) {
+            autoTitle = undefined
+          }
         } catch {
           // 标题生成失败不影响主流程
         }
