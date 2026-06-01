@@ -119,6 +119,35 @@ function buildStyleGuide(fidelity: number): string {
   return parts.join("\n")
 }
 
+// RAG 检索结果 AI 摘要：将碎片化的 chunks 提炼成连贯上下文
+async function summarizeRagChunks(chunks: RagCall[]): Promise<string | null> {
+  if (chunks.length === 0) return null
+  const summaryPrompt = `请根据以下从素材库检索到的参考片段，提炼一段连贯、去重、按主题组织的参考上下文。
+要求：
+1. 去除重复或高度相似的内容
+2. 如果不同片段对同一设定有矛盾描述，优先保留最详细/最权威的那条
+3. 按「世界观设定」「角色特征」「情节参考」「语言风格」分组组织
+4. 总长度控制在 500-800 字
+5. 保持原文的关键细节和用词风格
+
+参考片段：
+${chunks.map((c, i) => `【片段 ${i + 1}】${c.content}`).join("\n\n")}`
+
+  try {
+    const summary = await chatCompletion({
+      messages: [{ role: "user", content: summaryPrompt }],
+      temperature: 0.3,
+      maxTokens: 1200,
+    })
+    const trimmed = summary.trim()
+    // 如果摘要结果过短，视为失败，回退到原始 chunks 拼接
+    if (trimmed.length < 50) return null
+    return trimmed
+  } catch {
+    return null
+  }
+}
+
 function buildWorldViewSection(worldBible: typeof worldBibles.$inferSelect | undefined): string {
   if (!worldBible) return ""
 
@@ -410,11 +439,18 @@ async function buildSystemPrompt(
     } catch { /* 翻译记忆检索可选，失败不影响主流程 */ }
   }
 
-  if (ragParts.length > 0) {
-    ragContent = "\n" + ragParts.join("\n\n")
+  // 5. RAG 结果 AI 摘要（将所有检索到的 chunks 提炼成连贯上下文）
+  if (ragCalls.length > 0) {
+    const ragSummary = await summarizeRagChunks(ragCalls)
+    if (ragSummary) {
+      ragContent = "\n【参考素材摘要】\n" + ragSummary
+    } else if (ragParts.length > 0) {
+      // fallback: 原始 chunks 拼接
+      ragContent = "\n" + ragParts.join("\n\n")
+    }
   }
 
-  // 5. 辅助数据
+  // 6. 辅助数据
   const lengthDesc: Record<string, string> = {
     short: "一个短场景，约 500-1000 字",
     chapter: "完整一章，约 2000-4000 字",
@@ -430,7 +466,7 @@ async function buildSystemPrompt(
     epic: "史诗壮阔",
   }
 
-  // 6. 构建禁止角色列表
+  // 7. 构建禁止角色列表
   let forbiddenList = ""
   if (unselectedChars.length > 0) {
     forbiddenList = `\n【严禁出场的角色】以下角色绝对禁止在本故事中出现，无论以对话、回忆、旁白还是任何其他形式：\n${unselectedChars.map(c => `- ${c.name}`).join("\n")}\n违反此规则将被视为严重错误，必须避免。`
@@ -555,7 +591,11 @@ async function buildSystemPrompt(
   // RAG 素材
   if (ragContent) {
     parts.push("")
-    parts.push("【参考素材使用规则】以下检索到的素材仅供风格、语气和叙事节奏参考，严禁直接使用其情节或角色：")
+    const useSummary = ragContent.includes("【参考素材摘要】")
+    parts.push(useSummary
+      ? "【参考素材使用规则】以下是从检索素材中提炼的参考上下文，已去除重复、按主题组织。仅供风格、语气和叙事节奏参考，严禁直接使用其情节或角色："
+      : "【参考素材使用规则】以下检索到的素材仅供风格、语气和叙事节奏参考，严禁直接使用其情节或角色："
+    )
     parts.push("1. 禁止直接复制素材中的情节、对话或场景")
     parts.push("2. 禁止强行将素材内容插入到你的创作中")
     parts.push("3. 仅借鉴其语言风格、描写方式和节奏感")
