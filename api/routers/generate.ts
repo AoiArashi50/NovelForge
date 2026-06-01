@@ -207,7 +207,8 @@ async function buildSystemPrompt(
   useMaterials?: boolean,
   materialIds?: number[],
   selectedCharacterIds?: number[],
-  selectedTropeIds?: number[]
+  selectedTropeIds?: number[],
+  hotkeyTropeIds?: number[]
 ): Promise<{ prompt: string; ragCalls: RagCall[]; warnings?: string[] }> {
   const params: GenParams = {
     temperature: rawParams.temperature ?? 0.8,
@@ -464,33 +465,62 @@ async function buildSystemPrompt(
     parts.push(forbiddenList)
   }
 
-  // 7. 桥段（Trope）注入
-  if (selectedTropeIds && selectedTropeIds.length > 0) {
+  // 7. 桥段（Trope）注入 — 用户选择 + 热key推荐
+  const allTropeIds = new Set([
+    ...(selectedTropeIds || []),
+    ...(hotkeyTropeIds || []),
+  ])
+  if (allTropeIds.size > 0) {
     const tropes = await db
       .select()
       .from(plotTropes)
       .where(eq(plotTropes.seriesId, seriesId))
-    const selectedTropes = tropes.filter(t => selectedTropeIds.includes(t.id))
-    if (selectedTropes.length > 0) {
+    const selectedTropes = tropes.filter(t => selectedTropeIds?.includes(t.id))
+    const hotkeyTropes = tropes.filter(t =>
+      hotkeyTropeIds?.includes(t.id) && !selectedTropeIds?.includes(t.id)
+    )
+
+    if (selectedTropes.length > 0 || hotkeyTropes.length > 0) {
       parts.push("")
       parts.push("【参考桥段 — 可借鉴的情节模式】")
-      parts.push("以下桥段来自原作/素材的分析总结，供你参考其结构、节奏和情感转折方式。你可以借鉴其模式，但必须创作全新的情节和对话，禁止直接复制。")
-      for (const trope of selectedTropes) {
-        parts.push(`\n「${trope.name}」`)
-        if (trope.description) parts.push(`  描述: ${trope.description}`)
-        if (trope.pattern) parts.push(`  流程: ${trope.pattern}`)
-        const exs = (trope.examples as string[] || [])
-        if (exs.length > 0) {
-          parts.push(`  素材佐证:`)
-          for (const ex of exs.slice(0, 2)) {
-            parts.push(`    - ${ex.slice(0, 120)}${ex.length > 120 ? "..." : ""}`)
+
+      if (selectedTropes.length > 0) {
+        parts.push("以下是你本次明确选择的桥段，供你参考其结构、节奏和情感转折方式：")
+        for (const trope of selectedTropes) {
+          parts.push(`\n「${trope.name}」`)
+          if (trope.description) parts.push(`  描述: ${trope.description}`)
+          if (trope.pattern) parts.push(`  流程: ${trope.pattern}`)
+          const exs = (trope.examples as string[] || [])
+          if (exs.length > 0) {
+            parts.push(`  素材佐证:`)
+            for (const ex of exs.slice(0, 2)) {
+              parts.push(`    - ${ex.slice(0, 120)}${ex.length > 120 ? "..." : ""}`)
+            }
           }
         }
       }
+
+      if (hotkeyTropes.length > 0) {
+        parts.push("\n以下是你历史创作中高频使用的桥段（热键推荐），建议自然融入创作：")
+        for (const trope of hotkeyTropes) {
+          parts.push(`\n🔥「${trope.name}」（常用桥段）`)
+          if (trope.description) parts.push(`  描述: ${trope.description}`)
+          if (trope.pattern) parts.push(`  流程: ${trope.pattern}`)
+          const exs = (trope.examples as string[] || [])
+          if (exs.length > 0) {
+            parts.push(`  素材佐证:`)
+            for (const ex of exs.slice(0, 2)) {
+              parts.push(`    - ${ex.slice(0, 120)}${ex.length > 120 ? "..." : ""}`)
+            }
+          }
+        }
+      }
+
       parts.push("\n【桥段使用规则】")
       parts.push("1. 借鉴桥段的情节结构和情感节奏，不要照搬具体情节")
       parts.push("2. 桥段中的角色名、地点、对话必须替换为你自己的创作")
       parts.push("3. 多个桥段可以融合使用，创造出新的变体")
+      parts.push("4. 热键推荐桥段是你过往创作的习惯模式，可适当融入以增强个人风格")
     }
   }
 
@@ -556,6 +586,28 @@ async function buildSystemPrompt(
   return { prompt: parts.join("\n"), ragCalls, warnings: warnings.length > 0 ? warnings : undefined }
 }
 
+// 辅助：查询用户历史高频使用的桥段（热键）
+async function getHotkeyTropeIds(seriesId: number, limit = 3): Promise<number[]> {
+  const db = getDb()
+  const works = await db
+    .select()
+    .from(fanFictionWorks)
+    .where(eq(fanFictionWorks.seriesId, seriesId))
+  const tropeCount = new Map<number, number>()
+  for (const work of works) {
+    const ids = (work.parameters as Record<string, unknown>)?.selectedTropeIds as number[] | undefined
+    if (ids) {
+      for (const id of ids) {
+        tropeCount.set(id, (tropeCount.get(id) || 0) + 1)
+      }
+    }
+  }
+  return Array.from(tropeCount.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([id]) => id)
+}
+
 // 辅助：流式生成并收集完整内容
 async function generateContent(
   messages: Array<{ role: "system" | "user"; content: string }>,
@@ -585,6 +637,7 @@ export const generateRouter = createRouter({
       selectedTropeIds: z.array(z.number()).optional(),
     }))
     .mutation(async ({ input }) => {
+      const hotkeyTropeIds = await getHotkeyTropeIds(input.seriesId)
       const { prompt: systemPrompt, ragCalls, warnings } = await buildSystemPrompt(
         input.seriesId,
         input.brief,
@@ -594,7 +647,8 @@ export const generateRouter = createRouter({
         input.useMaterials,
         input.materialIds,
         input.selectedCharacterIds,
-        input.selectedTropeIds
+        input.selectedTropeIds,
+        hotkeyTropeIds
       )
 
       const messages = [
@@ -697,6 +751,7 @@ export const generateRouter = createRouter({
       }
 
       const storedParams = (work.parameters || {}) as Record<string, unknown>
+      const hotkeyTropeIds = await getHotkeyTropeIds(work.seriesId!)
       const { prompt: systemPrompt, ragCalls, warnings } = await buildSystemPrompt(
         work.seriesId!,
         input.brief || "请继续以下内容",
@@ -706,7 +761,8 @@ export const generateRouter = createRouter({
         input.useMaterials,
         undefined,
         storedParams.selectedCharacterIds as number[] | undefined,
-        storedParams.selectedTropeIds as number[] | undefined
+        storedParams.selectedTropeIds as number[] | undefined,
+        hotkeyTropeIds
       )
 
       const messages = [
@@ -750,6 +806,7 @@ export const generateRouter = createRouter({
       }
 
       const regenParams = (work.parameters || {}) as Record<string, unknown>
+      const hotkeyTropeIds = await getHotkeyTropeIds(work.seriesId!)
       const { prompt: systemPrompt, ragCalls, warnings } = await buildSystemPrompt(
         work.seriesId!,
         input.modifiedBrief,
@@ -759,7 +816,8 @@ export const generateRouter = createRouter({
         input.useMaterials,
         undefined,
         regenParams.selectedCharacterIds as number[] | undefined,
-        regenParams.selectedTropeIds as number[] | undefined
+        regenParams.selectedTropeIds as number[] | undefined,
+        hotkeyTropeIds
       )
 
       const messages = [

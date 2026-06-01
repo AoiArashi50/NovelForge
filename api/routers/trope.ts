@@ -1,8 +1,8 @@
 import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
-import { plotTropes, tropeCharacterLinks, tropeCanonLinks, characterCards, seriesCanon } from "@db/schema"
-import { eq, asc } from "drizzle-orm"
+import { plotTropes, tropeCharacterLinks, tropeCanonLinks, characterCards, seriesCanon, fanFictionWorks } from "@db/schema"
+import { eq, asc, inArray } from "drizzle-orm"
 import { chatCompletion } from "../services/deepseek"
 
 /* ========== 内存任务存储（后台异步提取） ========== */
@@ -323,6 +323,57 @@ export const tropeRouter = createRouter({
           ? { count: task.result.count }
           : null,
         error: task.error || null,
+      }
+    }),
+
+  // 热key桥段统计：根据用户历史生成记录统计高频使用的桥段
+  hotkeys: publicQuery
+    .input(z.object({
+      seriesId: z.number(),
+      limit: z.number().min(1).max(20).default(5),
+    }))
+    .query(async ({ input }) => {
+      const db = getDb()
+
+      // 查询该系列下所有生成作品
+      const works = await db
+        .select()
+        .from(fanFictionWorks)
+        .where(eq(fanFictionWorks.seriesId, input.seriesId))
+
+      // 统计每个桥段的使用次数
+      const countMap = new Map<number, number>()
+      for (const work of works) {
+        const ids = (work.parameters as Record<string, unknown>)?.selectedTropeIds as number[] | undefined
+        if (ids) {
+          for (const id of ids) {
+            countMap.set(id, (countMap.get(id) || 0) + 1)
+          }
+        }
+      }
+
+      if (countMap.size === 0) {
+        return { hotkeys: [] }
+      }
+
+      // 按使用次数排序，取 Top N
+      const sorted = Array.from(countMap.entries())
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, input.limit)
+
+      const tropeIds = sorted.map(([id]) => id)
+      const tropes = await db
+        .select()
+        .from(plotTropes)
+        .where(inArray(plotTropes.id, tropeIds))
+
+      const tropeMap = new Map(tropes.map(t => [t.id, t]))
+
+      return {
+        hotkeys: sorted.map(([id, count]) => ({
+          ...(tropeMap.get(id)!),
+          usageCount: count,
+        })),
       }
     }),
 })

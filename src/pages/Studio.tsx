@@ -103,6 +103,12 @@ export default function Studio() {
     { seriesId: selectedSeriesId || 0 },
     { enabled: !!selectedSeriesId }
   )
+  // 查询热key桥段（用户历史高频使用）
+  const { data: hotkeyTropes } = trpc.trope.hotkeys.useQuery(
+    { seriesId: selectedSeriesId || 0, limit: 5 },
+    { enabled: !!selectedSeriesId }
+  )
+  const hotkeyTropeIdSet = new Set(hotkeyTropes?.hotkeys.map(t => t.id) || [])
 
   // 系列切换时重置角色选择和桥段选择
   useEffect(() => {
@@ -828,6 +834,13 @@ export default function Studio() {
                   <label className="flex items-center gap-2 font-mono text-xs uppercase tracking-wider text-white/70">
                     <Theater className="w-3.5 h-3.5" />
                     参考桥段
+                    {hotkeyTropes && hotkeyTropes.hotkeys.length > 0 && (
+                      <span className="text-[10px] text-amber-500/60 ml-1"
+
+                      >
+                        🔥 {hotkeyTropes.hotkeys.length} 个热键推荐
+                      </span>
+                    )}
                   </label>
                   <div className="flex items-center gap-2">
                     <button
@@ -848,6 +861,7 @@ export default function Studio() {
                 <div className="flex flex-wrap gap-2">
                   {seriesTropes.map(trope => {
                     const isSelected = selectedTropeIds.includes(trope.id)
+                    const isHotkey = hotkeyTropeIdSet.has(trope.id)
                     return (
                       <button
                         key={trope.id}
@@ -862,17 +876,21 @@ export default function Studio() {
                         className={`px-2.5 py-1 rounded-full text-xs font-mono border transition-colors ${
                           isSelected
                             ? "bg-amber-500/10 text-amber-400 border-amber-500/30"
-                            : "bg-white/[0.03] text-white/40 border-white/10 hover:border-white/20"
+                            : isHotkey
+                              ? "bg-red-500/5 text-red-300/70 border-red-500/20 hover:border-red-500/40"
+                              : "bg-white/[0.03] text-white/40 border-white/10 hover:border-white/20"
                         }`}
                       >
-                        {isSelected ? "✓ " : ""}{trope.name}
+                        {isSelected ? "✓ " : ""}
+                        {isHotkey && !isSelected ? "🔥 " : ""}
+                        {trope.name}
                       </button>
                     )
                   })}
                 </div>
                 {selectedTropeIds.length === 0 && (
                   <p className="text-[10px] font-mono mt-2 text-white/30">
-                    未选择桥段。选择桥段后，AI 将借鉴其情节结构和情感节奏来增强创作。
+                    未选择桥段。🔥 标记的是你历史创作中高频使用的热键桥段，点击即可选用。
                   </p>
                 )}
               </div>
