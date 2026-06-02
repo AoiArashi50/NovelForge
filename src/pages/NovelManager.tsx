@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router"
 import { trpc } from "@/providers/trpc"
 import { useToast } from "@/providers/toast"
-import { useState, useMemo, useCallback } from "react"
+import { useState, useMemo, useCallback, useEffect } from "react"
 import { useDropzone } from "react-dropzone"
 import NavBar from "@/components/NavBar"
 import type { inferRouterOutputs } from "@trpc/server"
@@ -31,8 +31,26 @@ export default function NovelManager() {
   const updateMutation = trpc.novel.update.useMutation({
     onSuccess: () => utils.novel.list.invalidate(),
   })
-  const translateChapterMutation = trpc.translate.chapter.useMutation()
+  const translateChapterMutation = trpc.translate.chapter.useMutation({
+    onSuccess: () => {
+      // 每章翻译完成后立即刷新列表，确保 UI 及时更新
+      utils.novel.list.refetch()
+    },
+  })
   const indexMutation = trpc.rag.indexNovel.useMutation()
+  const importToMaterialMutation = trpc.novel.importToMaterial.useMutation({
+    onSuccess: (data) => {
+      utils.material.list.invalidate()
+      const typeLabel = data.sourceType === "parallel_corpus" ? "双语平行语料" : "参考小说"
+      const extra = data.sourceType === "parallel_corpus" && data.pairCount
+        ? `（${data.pairCount} 对段落）`
+        : ""
+      toast.success(`已导入为${typeLabel}：${data.title}${extra}，请前往素材池索引`)
+    },
+    onError: (err) => {
+      toast.error(`导入失败：${err.message}`)
+    },
+  })
   const assignTagMutation = trpc.tag.assign.useMutation({
     onSuccess: () => utils.novel.tags.invalidate(),
   })
@@ -75,6 +93,12 @@ export default function NovelManager() {
   const [searchQuery, setSearchQuery] = useState("")
   const [openMenuId, setOpenMenuId] = useState<number | null>(null)
 
+  // 批量操作
+  const [isBatchMode, setIsBatchMode] = useState(false)
+  const [selectedNovelIds, setSelectedNovelIds] = useState<Set<number>>(new Set())
+  const [batchProgress, setBatchProgress] = useState<{ current: number; total: number; label: string } | null>(null)
+  const [batchSeriesModal, setBatchSeriesModal] = useState(false)
+
   const onDrop = useCallback((acceptedFiles: File[]) => {
     setFiles(prev => [...prev, ...acceptedFiles])
   }, [])
@@ -99,10 +123,102 @@ export default function NovelManager() {
     )
   }, [novels, searchQuery])
 
+  // 恢复滚动位置
+  useEffect(() => {
+    const saved = sessionStorage.getItem("novelmanager_scroll")
+    if (saved) {
+      const pos = parseInt(saved, 10)
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: pos, behavior: "instant" })
+      })
+      sessionStorage.removeItem("novelmanager_scroll")
+    }
+  }, [])
+
   const getNovelTags = (novelId: number) => {
     if (!allTags || !tagMap) return []
     const tagIds = tagMap.filter(tm => tm.novelId === novelId).map(tm => tm.tagId)
     return allTags.filter(t => tagIds.includes(t.id))
+  }
+
+  // 批量操作：全选 / 反选
+  const toggleSelectAll = () => {
+    if (!filteredNovels) return
+    if (selectedNovelIds.size === filteredNovels.length) {
+      setSelectedNovelIds(new Set())
+    } else {
+      setSelectedNovelIds(new Set(filteredNovels.map(n => n.id)))
+    }
+  }
+
+  const toggleSelectNovel = (novelId: number) => {
+    setSelectedNovelIds(prev => {
+      const next = new Set(prev)
+      if (next.has(novelId)) next.delete(novelId)
+      else next.add(novelId)
+      return next
+    })
+  }
+
+  // 批量索引
+  const handleBatchIndex = async () => {
+    if (selectedNovelIds.size === 0) return
+    const ids = Array.from(selectedNovelIds)
+    setBatchProgress({ current: 0, total: ids.length, label: "索引到 RAG" })
+    try {
+      for (let i = 0; i < ids.length; i++) {
+        setBatchProgress({ current: i, total: ids.length, label: `索引到 RAG：${ids[i]}` })
+        await indexMutation.mutateAsync({ novelId: ids[i] })
+      }
+      toast.success(`已完成 ${ids.length} 本小说的索引`)
+    } catch (err) {
+      toast.error("批量索引中断: " + String(err))
+    } finally {
+      setBatchProgress(null)
+    }
+  }
+
+  // 批量导入素材库
+  const handleBatchImport = async () => {
+    if (selectedNovelIds.size === 0) return
+    const ids = Array.from(selectedNovelIds)
+    setBatchProgress({ current: 0, total: ids.length, label: "导入素材库" })
+    try {
+      for (let i = 0; i < ids.length; i++) {
+        setBatchProgress({ current: i, total: ids.length, label: `导入素材库：${ids[i]}` })
+        await importToMaterialMutation.mutateAsync({ novelId: ids[i] })
+      }
+      toast.success(`已导入 ${ids.length} 本小说到素材库`)
+      utils.material.list.invalidate()
+    } catch (err) {
+      toast.error("批量导入中断: " + String(err))
+    } finally {
+      setBatchProgress(null)
+    }
+  }
+
+  // 批量绑定系列
+  const handleBatchBindSeries = async () => {
+    if (selectedNovelIds.size === 0) return
+    if (!selectedSeriesForBind) {
+      toast.warning("请先选择要绑定的系列")
+      return
+    }
+    const ids = Array.from(selectedNovelIds)
+    setBatchProgress({ current: 0, total: ids.length, label: "绑定系列" })
+    try {
+      for (let i = 0; i < ids.length; i++) {
+        setBatchProgress({ current: i, total: ids.length, label: `绑定系列：${ids[i]}` })
+        await updateMutation.mutateAsync({ id: ids[i], seriesId: selectedSeriesForBind })
+      }
+      toast.success(`已将 ${ids.length} 本小说绑定到系列`)
+    } catch (err) {
+      toast.error("批量绑定中断: " + String(err))
+    } finally {
+      setBatchProgress(null)
+      setBatchSeriesModal(false)
+      setSelectedSeriesForBind(null)
+    }
   }
 
   const handleCreate = () => {
@@ -191,6 +307,7 @@ export default function NovelManager() {
       }
 
       // 更新小说状态为已翻译
+      await updateMutation.mutateAsync({ id: translateNovel.id, status: "translated" })
       await utils.novel.list.invalidate()
 
       setTranslateProgress({ current: chapterList.length, total: chapterList.length, chapterTitle: "", isTranslating: false })
@@ -253,22 +370,41 @@ export default function NovelManager() {
             <p className="text-white/70 mt-2 font-mono text-sm">管理你的翻译与阅读项目</p>
           </div>
           <div className="flex items-center gap-3">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/50" />
-              <input
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                placeholder="搜索小说..."
-                className="pl-9 pr-4 py-2 rounded-full bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-sm w-56 text-[#FDFBF5] placeholder:text-white/40"
-              />
-            </div>
-            <button
-              onClick={() => setShowForm(!showForm)}
-              className="flex items-center gap-2 px-6 py-3 bg-amber-500 hover:bg-amber-400 text-[#111827] rounded-full font-medium transition-colors"
-            >
-              <Plus className="w-4 h-4" />
-              添加小说
-            </button>
+            {isBatchMode ? (
+              <button
+                onClick={() => { setIsBatchMode(false); setSelectedNovelIds(new Set()); }}
+                className="px-4 py-2 rounded-full text-sm bg-white/5 hover:bg-white/10 text-white/70 transition-colors"
+              >
+                完成
+              </button>
+            ) : (
+              <>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-white/50" />
+                  <input
+                    value={searchQuery}
+                    onChange={e => setSearchQuery(e.target.value)}
+                    placeholder="搜索小说..."
+                    className="pl-9 pr-4 py-2 rounded-full bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-sm w-56 text-[#FDFBF5] placeholder:text-white/40"
+                  />
+                </div>
+                {filteredNovels.length > 0 && (
+                  <button
+                    onClick={() => setIsBatchMode(true)}
+                    className="px-4 py-2 rounded-full text-sm bg-white/5 hover:bg-white/10 text-white/70 hover:text-amber-400 transition-colors"
+                  >
+                    批量选择
+                  </button>
+                )}
+                <button
+                  onClick={() => setShowForm(!showForm)}
+                  className="flex items-center gap-2 px-6 py-3 bg-amber-500 hover:bg-amber-400 text-[#111827] rounded-full font-medium transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  添加小说
+                </button>
+              </>
+            )}
           </div>
         </div>
 
@@ -374,10 +510,42 @@ export default function NovelManager() {
               return (
                 <div
                   key={novel.id}
-                  className="group p-6 rounded-xl bg-white/[0.03] border border-white/10 hover:border-amber-500/30 hover:bg-white/[0.05] transition-all cursor-pointer"
-                  onClick={() => navigate(`/reader/${novel.id}`)}
+                  className={`group p-6 rounded-xl border transition-all cursor-pointer relative ${
+                    selectedNovelIds.has(novel.id)
+                      ? "bg-amber-500/5 border-amber-500/30"
+                      : "bg-white/[0.03] border-white/10 hover:border-amber-500/30 hover:bg-white/[0.05]"
+                  }`}
+                  onClick={() => {
+                    if (isBatchMode) {
+                      toggleSelectNovel(novel.id)
+                    } else {
+                      sessionStorage.setItem("novelmanager_scroll", String(window.scrollY))
+                      navigate(`/reader/${novel.id}`)
+                    }
+                  }}
                 >
-                  <div className="flex items-start justify-between mb-4">
+                  {/* 选择复选框 — 批量模式下显示 */}
+                  {isBatchMode && (
+                    <div className="absolute top-3 left-3">
+                      <button
+                        onClick={e => {
+                          e.stopPropagation()
+                          toggleSelectNovel(novel.id)
+                        }}
+                        className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${
+                          selectedNovelIds.has(novel.id)
+                            ? "bg-amber-500 border-amber-500"
+                            : "border-white/20 bg-white/5 group-hover:border-white/40"
+                        }`}
+                      >
+                        {selectedNovelIds.has(novel.id) && (
+                          <svg className="w-3 h-3 text-[#111827]" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}><path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" /></svg>
+                        )}
+                      </button>
+                    </div>
+                  )}
+
+                  <div className={`flex items-start justify-between mb-4 ${isBatchMode ? "pl-7" : ""}`}>
                     <div className="w-10 h-10 rounded-lg bg-amber-500/20 flex items-center justify-center">
                       <BookOpen className="w-5 h-5 text-amber-500" />
                     </div>
@@ -515,6 +683,16 @@ export default function NovelManager() {
                         className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/5 text-left text-sm text-white/70 hover:text-amber-400 transition-colors disabled:opacity-30"
                       >
                         <Database className="w-3.5 h-3.5" /> 索引到 RAG
+                      </button>
+                      <button
+                        onClick={() => {
+                          setOpenMenuId(null)
+                          importToMaterialMutation.mutate({ novelId: novel.id })
+                        }}
+                        disabled={importToMaterialMutation.isPending}
+                        className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/5 text-left text-sm text-white/70 hover:text-amber-400 transition-colors disabled:opacity-30"
+                      >
+                        <Upload className="w-3.5 h-3.5" /> 导入素材库
                       </button>
                     </div>
                   )}
@@ -820,6 +998,112 @@ export default function NovelManager() {
                   <p className="text-white/80 text-sm line-clamp-4">{call.content}</p>
                 </div>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 底部批量操作栏 */}
+      {isBatchMode && (
+        <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#1F2937]/95 backdrop-blur border-t border-white/10 px-8 py-3">
+          <div className="max-w-[1400px] mx-auto flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={toggleSelectAll}
+                className="text-sm text-white/60 hover:text-white/90 transition-colors"
+              >
+                {filteredNovels && selectedNovelIds.size === filteredNovels.length ? "取消全选" : `全选 (${selectedNovelIds.size})`}
+              </button>
+              <span className="text-white/40 text-sm">已选择 {selectedNovelIds.size} 本小说</span>
+            </div>
+            <div className="flex items-center gap-2">
+              {batchProgress ? (
+                <div className="flex items-center gap-3">
+                  <span className="text-white/60 text-sm font-mono">{batchProgress.label} {batchProgress.current}/{batchProgress.total}</span>
+                  <Loader2 className="w-4 h-4 animate-spin text-amber-500" />
+                </div>
+              ) : (
+                <>
+                  <button
+                    onClick={() => { setBatchSeriesModal(true); setSelectedSeriesForBind(null); }}
+                    className="px-4 py-2 rounded-full text-sm bg-white/5 hover:bg-white/10 text-white/70 hover:text-amber-400 transition-colors flex items-center gap-1.5"
+                  >
+                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                    批量绑定系列
+                  </button>
+                  <button
+                    onClick={handleBatchImport}
+                    disabled={importToMaterialMutation.isPending}
+                    className="px-4 py-2 rounded-full text-sm bg-white/5 hover:bg-white/10 text-white/70 hover:text-amber-400 transition-colors flex items-center gap-1.5 disabled:opacity-30"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    批量导入素材
+                  </button>
+                  <button
+                    onClick={handleBatchIndex}
+                    disabled={indexMutation.isPending}
+                    className="px-4 py-2 rounded-full text-sm bg-amber-500 hover:bg-amber-400 text-[#111827] font-medium transition-colors flex items-center gap-1.5 disabled:opacity-30"
+                  >
+                    <Database className="w-3.5 h-3.5" />
+                    批量索引
+                  </button>
+                  <button
+                    onClick={() => setSelectedNovelIds(new Set())}
+                    className="px-3 py-2 rounded-full text-sm text-white/40 hover:text-white/70 transition-colors"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 批量绑定系列 Modal */}
+      {batchSeriesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md p-6 rounded-2xl bg-[#1F2937] border border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <svg className="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                <h3 className="font-serif text-lg font-semibold">批量绑定系列</h3>
+              </div>
+              <button onClick={() => { setBatchSeriesModal(false); setSelectedSeriesForBind(null); }} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-white/70 text-sm mb-4 font-mono">将为 {selectedNovelIds.size} 本小说绑定到同一系列</p>
+            <div className="space-y-2 mb-6">
+              {(seriesList || []).map(s => (
+                <button
+                  key={s.id}
+                  onClick={() => setSelectedSeriesForBind(s.id)}
+                  className={`w-full text-left px-4 py-2.5 rounded-xl text-sm transition-colors ${
+                    selectedSeriesForBind === s.id
+                      ? "bg-amber-500/20 border border-amber-500/30 text-amber-400"
+                      : "bg-white/5 border border-transparent hover:bg-white/10 text-white/60"
+                  }`}
+                >
+                  {s.name}
+                </button>
+              ))}
+              {(!seriesList || seriesList.length === 0) && (
+                <p className="text-white/40 text-sm text-center py-4">暂无系列，请先在设定库中创建</p>
+              )}
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={handleBatchBindSeries}
+                disabled={!selectedSeriesForBind || updateMutation.isPending}
+                className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium text-sm transition-colors"
+              >
+                {updateMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : "确认绑定"}
+              </button>
+              <button
+                onClick={() => { setBatchSeriesModal(false); setSelectedSeriesForBind(null); }}
+                className="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-full text-sm"
+              >
+                取消
+              </button>
             </div>
           </div>
         </div>

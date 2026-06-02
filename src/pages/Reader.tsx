@@ -1,20 +1,23 @@
 import { useParams, useNavigate } from "react-router"
 import { trpc } from "@/providers/trpc"
+import { useToast } from "@/providers/toast"
 import { useState, useEffect } from "react"
 import type React from "react"
 import NavBar from "@/components/NavBar"
 import {
   ChevronLeft, ChevronRight, List, Languages, Type, ArrowLeft,
   Play, Download, Bookmark, BookmarkPlus, X, Loader2, Settings, Save,
-  Highlighter, PenLine
+  Highlighter, PenLine, Database, Upload
 } from "lucide-react"
 
 export default function Reader() {
   const { novelId } = useParams<{ novelId: string }>()
   const navigate = useNavigate()
+  const toast = useToast()
   const id = parseInt(novelId || "0")
   const [currentChapterId, setCurrentChapterId] = useState<number | null>(null)
   const [bilingualMode, setBilingualMode] = useState<"original" | "translated" | "bilingual">("translated")
+  const [hoveredParagraph, setHoveredParagraph] = useState<number | null>(null)
   const [showSidebar, setShowSidebar] = useState(false)
   const [fontSize, setFontSize] = useState(18)
   const [theme, setTheme] = useState<"light" | "sepia" | "dark" | "oled">("dark")
@@ -39,6 +42,32 @@ export default function Reader() {
   const [annotationColor, setAnnotationColor] = useState("yellow")
   const [showAnnotationForm, setShowAnnotationForm] = useState(false)
 
+  // 段落对齐检测
+  const [paragraphMismatch, setParagraphMismatch] = useState<{
+    original: number
+    translated: number
+    diffPercent: number
+  } | null>(null)
+
+  // 逐章翻译进度
+  const [translateProgress, setTranslateProgress] = useState<{
+    current: number
+    total: number
+    chapterTitle: string
+    isTranslating: boolean
+  } | null>(null)
+
+  // 回到顶部按钮
+  const [showBackToTop, setShowBackToTop] = useState(false)
+
+  // 翻译设置
+  const [translateStyle, setTranslateStyle] = useState<"literal" | "fluent" | "literary">("fluent")
+  const [translatePrompt, setTranslatePrompt] = useState("")
+  const [translateRagCalls, setTranslateRagCalls] = useState<Array<{ type: string; content: string; score?: number; sourceType?: string }> | null>(null)
+  const [showRagPanel, setShowRagPanel] = useState(false)
+  const [ragTopK, setRagTopK] = useState(3)
+  const [ragLimit, setRagLimit] = useState(2)
+
   const { data: chapterList } = trpc.chapter.list.useQuery({ novelId: id })
   const { data: currentChapter } = trpc.chapter.getById.useQuery(
     { id: currentChapterId || 0 },
@@ -60,13 +89,37 @@ export default function Reader() {
   const deleteBookmarkMutation = trpc.chapter.bookmark.delete.useMutation({
     onSuccess: () => utils.chapter.bookmark.list.invalidate({ novelId: id }),
   })
-  const translateMutation = trpc.translate.start.useMutation({
+  const translateChapterMutation = trpc.translate.chapter.useMutation({
     onSuccess: () => {
-      utils.chapter.list.invalidate({ novelId: id })
+      // 每章翻译完成后立即刷新相关查询，确保 UI 及时更新
+      utils.chapter.list.refetch({ novelId: id })
+      utils.novel.getById.refetch({ id })
+      if (currentChapterId) {
+        utils.chapter.getById.refetch({ id: currentChapterId })
+      }
+    },
+  })
+  const indexMutation = trpc.rag.indexNovel.useMutation()
+  const importToMaterialMutation = trpc.novel.importToMaterial.useMutation({
+    onSuccess: () => {
+      utils.material.list.invalidate()
+      toast.success("已导入素材库")
+    },
+    onError: (err) => toast.error("导入失败：" + err.message),
+  })
+  const updateNovelMutation = trpc.novel.update.useMutation({
+    onSuccess: () => {
       utils.novel.getById.invalidate({ id })
+      utils.novel.list.invalidate()
     },
   })
   const trpcUtils = trpc.useUtils()
+
+  // Reader 页面操作菜单
+  const [showActionMenu, setShowActionMenu] = useState(false)
+  const [bindSeriesModal, setBindSeriesModal] = useState(false)
+  const [selectedSeriesId, setSelectedSeriesId] = useState<number | null>(null)
+  const { data: seriesList } = trpc.lore.series.list.useQuery()
 
   // Annotations
   const { data: annotationList } = trpc.annotation.list.useQuery(
@@ -99,11 +152,64 @@ export default function Reader() {
     }
   }, [chapterList])
 
+  // 检测段落对齐：双语模式下译文段落数与原文差异 >20% 时警告
+  useEffect(() => {
+    if (
+      bilingualMode === "bilingual" &&
+      currentChapter?.contentOriginal &&
+      currentChapter?.contentTranslated
+    ) {
+      const countOriginal = currentChapter.contentOriginal.split(/\n\s*\n/).filter(p => p.trim().length > 0).length
+      const countTranslated = currentChapter.contentTranslated.split(/\n\s*\n/).filter(p => p.trim().length > 0).length
+      const diff = Math.abs(countOriginal - countTranslated)
+      const diffPercent = countOriginal > 0 ? diff / countOriginal : 0
+      if (diffPercent > 0.2) {
+        setParagraphMismatch({ original: countOriginal, translated: countTranslated, diffPercent: Math.round(diffPercent * 100) })
+      } else {
+        setParagraphMismatch(null)
+      }
+    } else {
+      setParagraphMismatch(null)
+    }
+  }, [bilingualMode, currentChapter])
+
   useEffect(() => {
     if (currentChapter?.contentTranslated) {
       setEditContent(currentChapter.contentTranslated)
     }
   }, [currentChapter?.contentTranslated])
+
+  // 滚动监听：显示/隐藏回到顶部按钮
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowBackToTop(window.scrollY > 500)
+    }
+    window.addEventListener("scroll", handleScroll, { passive: true })
+    return () => window.removeEventListener("scroll", handleScroll)
+  }, [])
+
+  // 章节切换时保存/恢复滚动位置
+  useEffect(() => {
+    if (!currentChapterId) return
+
+    // 恢复上一章节的滚动位置
+    const saved = sessionStorage.getItem(`reader_scroll_${id}_${currentChapterId}`)
+    if (saved) {
+      const pos = parseInt(saved, 10)
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: pos, behavior: "instant" })
+      })
+    } else {
+      window.scrollTo({ top: 0, behavior: "instant" })
+    }
+
+    return () => {
+      // 离开章节时保存滚动位置
+      if (currentChapterId) {
+        sessionStorage.setItem(`reader_scroll_${id}_${currentChapterId}`, String(window.scrollY))
+      }
+    }
+  }, [currentChapterId, id])
 
   const currentIndex = chapterList?.findIndex(ch => ch.id === currentChapterId) ?? -1
   const totalChapters = chapterList?.length ?? 0
@@ -137,6 +243,72 @@ export default function Reader() {
   const handleSaveEdit = () => {
     if (!currentChapterId) return
     updateChapterMutation.mutate({ id: currentChapterId, contentTranslated: editContent })
+  }
+
+  // 逐章翻译
+  const handleTranslate = async () => {
+    if (!chapterList || chapterList.length === 0) {
+      toast.error("该小说暂无章节内容")
+      return
+    }
+
+    setTranslateProgress({ current: 0, total: chapterList.length, chapterTitle: "", isTranslating: true })
+    const allRagCalls: typeof translateRagCalls = []
+
+    try {
+      for (let i = 0; i < chapterList.length; i++) {
+        const ch = chapterList[i]
+        setTranslateProgress({
+          current: i,
+          total: chapterList.length,
+          chapterTitle: ch.title || `第${ch.chapterNumber}章`,
+          isTranslating: true,
+        })
+
+        const result = await translateChapterMutation.mutateAsync({
+          novelId: id,
+          chapterId: ch.id,
+          style: translateStyle,
+          userPrompt: translatePrompt.trim() || undefined,
+          ragTopK,
+          ragLimit,
+        })
+
+        if (result.ragCalls && result.ragCalls.length > 0) {
+          allRagCalls?.push(...result.ragCalls)
+        }
+      }
+
+      await utils.chapter.list.invalidate({ novelId: id })
+      await utils.novel.getById.invalidate({ id })
+      if (currentChapterId) {
+        await utils.chapter.getById.invalidate({ id: currentChapterId })
+      }
+
+      // 标记小说为已翻译
+      await updateNovelMutation.mutateAsync({ id, status: "translated" })
+      // 显式刷新小说列表，确保 NovelManager 中状态同步
+      await utils.novel.list.invalidate()
+
+      setTranslateProgress({ current: chapterList.length, total: chapterList.length, chapterTitle: "", isTranslating: false })
+      toast.success(`翻译完成，共 ${chapterList.length} 章`)
+
+      // 显示 RAG 报告
+      if (allRagCalls && allRagCalls.length > 0) {
+        const seen = new Set<string>()
+        const deduped = allRagCalls.filter(c => {
+          const key = c.type + "|" + c.content.slice(0, 80)
+          if (seen.has(key)) return false
+          seen.add(key)
+          return true
+        })
+        setTranslateRagCalls(deduped)
+        setShowRagPanel(true)
+      }
+    } catch (err) {
+      toast.error("翻译中断: " + String(err))
+      setTranslateProgress(prev => prev ? { ...prev, isTranslating: false } : null)
+    }
   }
 
   // Text selection handler for annotations
@@ -246,7 +418,6 @@ export default function Reader() {
   const cardBg = t.cardBg
   const hoverBg = t.hoverBg
   const activeBg = t.activeBg
-  const dividerColor = t.divider
   const labelColor = t.label
   const isLightTheme = theme === "light" || theme === "sepia"
   const inactiveText = isLightTheme ? "text-black/40 hover:bg-black/10" : "text-white/40 hover:bg-white/10"
@@ -288,6 +459,71 @@ export default function Reader() {
             <button onClick={() => setFontSize(s => Math.max(s - 2, 12))} className={`p-2 ${hoverBg} rounded-lg transition-colors hidden sm:block`} title="减小字体">
               <Type className="w-4 h-4" />
             </button>
+
+            {/* 更多操作下拉 */}
+            <div className="relative">
+              <button
+                onClick={() => setShowActionMenu(!showActionMenu)}
+                className={`p-2 ${hoverBg} rounded-lg transition-colors ${showActionMenu ? "text-amber-400" : ""}`}
+                title="更多操作"
+              >
+                <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 5v.01M12 12v.01M12 19v.01M12 6a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2zm0 7a1 1 0 110-2 1 1 0 010 2z" /></svg>
+              </button>
+              {showActionMenu && (
+                <>
+                  <div className="fixed inset-0 z-30" onClick={() => setShowActionMenu(false)} />
+                  <div className={`absolute right-0 top-full mt-1 w-48 ${cardBg} border ${borderColor} rounded-xl shadow-xl z-40 py-1 overflow-hidden`}>
+                    {novel?.seriesId && (
+                      <div className="px-3 py-1.5 text-xs text-white/40 font-mono truncate border-b border-white/5">
+                        系列: {seriesList?.find(s => s.id === novel.seriesId)?.name || "..."}
+                      </div>
+                    )}
+                    <button
+                      onClick={() => { setShowActionMenu(false); setBindSeriesModal(true); setSelectedSeriesId(novel?.seriesId || null); }}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-white/70 hover:text-amber-400 hover:bg-white/5 transition-colors text-left"
+                    >
+                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                      {novel?.seriesId ? "更换系列" : "绑定系列"}
+                    </button>
+                    <button
+                      onClick={() => { setShowActionMenu(false); indexMutation.mutate({ novelId: id }); toast.success("已开始索引到 RAG"); }}
+                      disabled={indexMutation.isPending}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-white/70 hover:text-amber-400 hover:bg-white/5 transition-colors text-left disabled:opacity-30"
+                    >
+                      <Database className="w-4 h-4" />
+                      {indexMutation.isPending ? "索引中..." : "索引到 RAG"}
+                    </button>
+                    <button
+                      onClick={() => { setShowActionMenu(false); importToMaterialMutation.mutate({ novelId: id }); }}
+                      disabled={importToMaterialMutation.isPending}
+                      className="w-full flex items-center gap-2 px-3 py-2 text-sm text-white/70 hover:text-amber-400 hover:bg-white/5 transition-colors text-left disabled:opacity-30"
+                    >
+                      <Upload className="w-4 h-4" />
+                      {importToMaterialMutation.isPending ? "导入中..." : "导入素材库"}
+                    </button>
+                    {hasTranslation && (
+                      <button
+                        onClick={() => {
+                          setShowActionMenu(false)
+                          if (window.confirm("重新翻译将覆盖现有译文，是否继续？")) {
+                            updateNovelMutation.mutateAsync({ id, status: "unread" }).then(() => {
+                              utils.chapter.list.invalidate({ novelId: id })
+                              utils.novel.getById.invalidate({ id })
+                              toast.success("已重置，可以重新翻译")
+                            })
+                          }
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-sm text-white/70 hover:text-amber-400 hover:bg-white/5 transition-colors text-left"
+                      >
+                        <Languages className="w-4 h-4" />
+                        重新翻译
+                      </button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
             <button onClick={() => setShowSettings(!showSettings)} className={`p-2 ${hoverBg} rounded-lg transition-colors`} title="阅读设置">
               <Settings className="w-5 h-5" />
             </button>
@@ -388,21 +624,118 @@ export default function Reader() {
       )}
 
       {/* Translation banner */}
-      {!hasTranslation && novel?.status !== "translated" && (
+      {(!hasTranslation || novel?.status === "unread") && (
         <div className={`max-w-[800px] mx-auto px-6 pt-4`}>
-          <div className={`p-4 rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-between`}>
-            <div className="flex items-center gap-3">
-              <Play className="w-5 h-5 text-amber-500" />
-              <span className="text-sm text-amber-400">该小说尚未翻译，点击开始 AI 翻译</span>
-            </div>
-            <button
-              onClick={() => translateMutation.mutate({ novelId: id, style: "fluent" })}
-              disabled={translateMutation.isPending}
-              className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full text-sm font-medium transition-colors flex items-center gap-1.5"
-            >
-              {translateMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-              {translateMutation.isPending ? "翻译中..." : "开始翻译"}
-            </button>
+          <div className={`p-4 rounded-xl bg-amber-500/10 border border-amber-500/20`}>
+            {translateProgress?.isTranslating ? (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-white/70 font-mono">
+                    {translateProgress.current > 0
+                      ? `已完成 ${translateProgress.current}/${translateProgress.total} 章`
+                      : `准备翻译 ${translateProgress.total} 章...`}
+                  </span>
+                  <span className="text-amber-400 text-xs font-mono">
+                    {translateProgress.chapterTitle}
+                  </span>
+                </div>
+                <div className="h-1.5 bg-white/10 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-amber-500 rounded-full transition-all duration-500"
+                    style={{
+                      width: `${translateProgress.total > 0 ? (translateProgress.current / translateProgress.total) * 100 : 0}%`,
+                    }}
+                  />
+                </div>
+                <div className="flex items-center gap-2 text-amber-400 text-sm">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>正在翻译 {translateProgress.chapterTitle || "..."}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <Play className="w-5 h-5 text-amber-500" />
+                    <span className="text-sm text-amber-400">该小说尚未翻译</span>
+                  </div>
+                  <button
+                    onClick={handleTranslate}
+                    disabled={translateChapterMutation.isPending}
+                    className="px-4 py-1.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full text-sm font-medium transition-colors flex items-center gap-1.5"
+                  >
+                    {translateChapterMutation.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+                    {translateChapterMutation.isPending ? "翻译中..." : "开始翻译"}
+                  </button>
+                </div>
+                {/* 翻译风格选择 */}
+                <div className="flex gap-2">
+                  {[
+                    { label: "直译", value: "literal" as const },
+                    { label: "流畅", value: "fluent" as const },
+                    { label: "文学", value: "literary" as const },
+                  ].map(opt => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setTranslateStyle(opt.value)}
+                      className={`flex-1 px-3 py-1.5 rounded-lg text-xs transition-colors ${
+                        translateStyle === opt.value
+                          ? "bg-amber-500/20 border border-amber-500/30 text-amber-400"
+                          : "bg-white/5 border border-transparent hover:bg-white/10 text-white/60"
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+                {/* RAG 参考数量配置 */}
+                <div className="flex gap-3">
+                  <div className="flex-1">
+                    <label className="block text-[10px] font-mono uppercase tracking-wider text-white/40 mb-1">翻译记忆条数</label>
+                    <div className="flex gap-1">
+                      {[1, 2, 3, 5, 10].map(n => (
+                        <button
+                          key={n}
+                          onClick={() => setRagTopK(n)}
+                          className={`flex-1 py-1 rounded text-[10px] transition-colors ${
+                            ragTopK === n
+                              ? "bg-amber-500/20 text-amber-400"
+                              : "bg-white/5 text-white/40 hover:bg-white/10"
+                          }`}
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="flex-1">
+                    <label className="block text-[10px] font-mono uppercase tracking-wider text-white/40 mb-1">向量检索条数</label>
+                    <div className="flex gap-1">
+                      {[1, 2, 3, 5, 10].map(n => (
+                        <button
+                          key={n}
+                          onClick={() => setRagLimit(n)}
+                          className={`flex-1 py-1 rounded text-[10px] transition-colors ${
+                            ragLimit === n
+                              ? "bg-amber-500/20 text-amber-400"
+                              : "bg-white/5 text-white/40 hover:bg-white/10"
+                          }`}
+                        >
+                          {n}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                {/* 自定义要求 */}
+                <textarea
+                  value={translatePrompt}
+                  onChange={e => setTranslatePrompt(e.target.value)}
+                  placeholder="自定义要求（可选）：如保持原文段落结构、使用古风表达、人名统一译为..."
+                  className="w-full h-16 px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5] text-xs resize-none placeholder:text-white/40"
+                />
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -681,21 +1014,53 @@ export default function Reader() {
                 </div>
               )}
 
-              {(bilingualMode === "original" || bilingualMode === "bilingual") && (
-                <div className={bilingualMode === "bilingual" ? `mb-8 pb-8 border-b ${dividerColor}` : ""}>
-                  <p className={`font-mono text-xs ${labelColor} mb-4 uppercase tracking-wider`}>原文</p>
-                  <div className={isLightTheme ? "text-black/80" : "text-white/80"}>
-                    {renderParagraphs(currentChapter.contentOriginal || "", paragraphSpacing, 0, handleTextSelection, annotationList)}
+              {/* 段落对齐警告 */}
+              {paragraphMismatch && bilingualMode === "bilingual" && (
+                <div className={`mb-6 p-4 rounded-xl border border-amber-500/30 ${isLightTheme ? "bg-amber-500/10" : "bg-amber-500/5"}`}>
+                  <div className="flex items-start gap-3">
+                    <span className="text-amber-500 text-lg leading-none mt-0.5">⚠️</span>
+                    <div className="flex-1">
+                      <p className="text-sm text-[#FDFBF5] mb-1">
+                        段落对齐警告：原文 {paragraphMismatch.original} 段，译文 {paragraphMismatch.translated} 段，差异 {paragraphMismatch.diffPercent}%
+                      </p>
+                      <p className="text-xs text-white/50 mb-2">
+                        AI 翻译可能将多个段落合并输出，导致双语对照时段落错位。可点击下方按钮进入编辑模式手动调整。
+                      </p>
+                      <button
+                        onClick={() => {
+                          setEditContent(currentChapter.contentTranslated || "")
+                          setEditingChapter(true)
+                        }}
+                        className="text-xs px-3 py-1.5 bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 rounded-full transition-colors"
+                      >
+                        编辑修正
+                      </button>
+                    </div>
                   </div>
                 </div>
               )}
 
-              {(bilingualMode === "translated" || bilingualMode === "bilingual") && (
-                <div>
-                  {bilingualMode === "bilingual" && (
+              {bilingualMode === "bilingual" ? (
+                <div className="md:grid md:grid-cols-2 md:gap-8">
+                  {/* 原文 */}
+                  <div>
+                    <p className={`font-mono text-xs ${labelColor} mb-4 uppercase tracking-wider`}>原文</p>
+                    <div className={isLightTheme ? "text-black/80" : "text-white/80"}>
+                      {renderParagraphs(
+                        currentChapter.contentOriginal || "",
+                        paragraphSpacing,
+                        0,
+                        handleTextSelection,
+                        annotationList,
+                        hoveredParagraph,
+                        setHoveredParagraph
+                      )}
+                    </div>
+                  </div>
+                  {/* 译文 */}
+                  <div>
                     <p className={`font-mono text-xs ${labelColor} mb-4 uppercase tracking-wider`}>译文</p>
-                  )}
-                  {editingChapter ? (
+                    {editingChapter ? (
                     <div>
                       <textarea
                         value={editContent}
@@ -721,11 +1086,65 @@ export default function Reader() {
                     </div>
                   ) : (
                     <div>
-                      {renderParagraphs(currentChapter.contentTranslated || currentChapter.contentOriginal || "暂无翻译", paragraphSpacing, 1000, handleTextSelection, annotationList)}
+                      {renderParagraphs(
+                        currentChapter.contentTranslated || currentChapter.contentOriginal || "暂无翻译",
+                        paragraphSpacing,
+                        1000,
+                        handleTextSelection,
+                        annotationList,
+                        hoveredParagraph,
+                        setHoveredParagraph
+                      )}
                     </div>
                   )}
                 </div>
-              )}
+              </div>
+            ) : (
+              <>
+                {(bilingualMode === "original" || bilingualMode === "translated") && (
+                  <>
+                    {bilingualMode === "original" && (
+                      <div className={isLightTheme ? "text-black/80" : "text-white/80"}>
+                        {renderParagraphs(currentChapter.contentOriginal || "", paragraphSpacing, 0, handleTextSelection, annotationList)}
+                      </div>
+                    )}
+                    {bilingualMode === "translated" && (
+                      <div>
+                        {editingChapter ? (
+                          <div>
+                            <textarea
+                              value={editContent}
+                              onChange={e => setEditContent(e.target.value)}
+                              className={`w-full h-96 px-4 py-3 rounded-xl bg-white/5 border ${borderColor} focus:border-amber-500 outline-none text-[#FDFBF5] text-sm resize-none font-serif leading-[1.8]`}
+                              style={{ fontSize: `${fontSize}px` }}
+                            />
+                            <div className="flex gap-2 mt-3">
+                              <button
+                                onClick={handleSaveEdit}
+                                disabled={updateChapterMutation.isPending}
+                                className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full text-sm font-medium"
+                              >
+                                <Save className="w-3.5 h-3.5" /> 保存
+                              </button>
+                              <button
+                                onClick={() => setEditingChapter(false)}
+                                className="px-4 py-2 bg-white/5 hover:bg-white/10 rounded-full text-sm"
+                              >
+                                取消
+                              </button>
+                            </div>
+                          </div>
+                        ) : (
+                          <div>
+                            {renderParagraphs(currentChapter.contentTranslated || currentChapter.contentOriginal || "暂无翻译", paragraphSpacing, 1000, handleTextSelection, annotationList)}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                )}
+              </>
+            )}
             </article>
           ) : (
             <div className={`text-center ${subTextColor} mt-20`}>请选择章节开始阅读</div>
@@ -757,8 +1176,115 @@ export default function Reader() {
               <ChevronRight className="w-4 h-4" />
             </button>
           </div>
+
+          {/* 回到顶部按钮 */}
+          {showBackToTop && (
+            <button
+              onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+              className="fixed bottom-6 right-6 z-30 w-10 h-10 rounded-full bg-amber-500 hover:bg-amber-400 text-[#111827] shadow-lg flex items-center justify-center transition-all hover:scale-110"
+              title="回到顶部"
+            >
+              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M5 10l7-7m0 0l7 7m-7-7v18" />
+              </svg>
+            </button>
+          )}
         </main>
       </div>
+
+      {/* RAG 调用信息面板 */}
+      {showRagPanel && translateRagCalls && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-2xl max-h-[80vh] overflow-y-auto p-6 rounded-2xl bg-[#1F2937] border border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <Database className="w-5 h-5 text-amber-500" />
+                <h3 className="font-serif text-lg font-semibold">RAG 检索详情</h3>
+              </div>
+              <button onClick={() => setShowRagPanel(false)} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-white/70 text-sm mb-4 font-mono">本次翻译共检索到 {translateRagCalls.length} 条参考</p>
+            <div className="space-y-3">
+              {translateRagCalls.map((call, i) => (
+                <div key={i} className="p-3 rounded-xl bg-white/5 border border-white/10">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className={
+                      call.type === "translation_memory" ? "text-amber-400 text-xs font-mono" :
+                      call.type === "vector_search" ? "text-green-400 text-xs font-mono" :
+                      "text-blue-400 text-xs font-mono"
+                    }>
+                      {call.type === "translation_memory" ? "翻译记忆" :
+                       call.type === "vector_search" ? "向量检索" : "全文检索"}
+                    </span>
+                    {call.score !== undefined && (
+                      <span className="text-white/40 text-xs font-mono">相似度: {(call.score * 100).toFixed(1)}%</span>
+                    )}
+                    {call.sourceType && (
+                      <span className="text-white/30 text-xs font-mono">来源: {call.sourceType}</span>
+                    )}
+                  </div>
+                  <p className="text-white/80 text-sm line-clamp-4">{call.content}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bind Series Modal */}
+      {bindSeriesModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div className="w-full max-w-md p-6 rounded-2xl bg-[#1F2937] border border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center gap-2">
+                <svg className="w-5 h-5 text-amber-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1" /></svg>
+                <h3 className="font-serif text-lg font-semibold">{novel?.seriesId ? "更换系列" : "绑定系列"}</h3>
+              </div>
+              <button onClick={() => { setBindSeriesModal(false); setSelectedSeriesId(null); }} className="p-1 rounded hover:bg-white/10"><X className="w-4 h-4" /></button>
+            </div>
+            <p className="text-white/70 text-sm mb-4 font-mono">《{novel?.title}》</p>
+            <div className="space-y-2 mb-6">
+              {(seriesList || []).map(s => (
+                <button
+                  key={s.id}
+                  onClick={() => setSelectedSeriesId(s.id)}
+                  className={`w-full text-left px-4 py-2.5 rounded-xl text-sm transition-colors ${
+                    selectedSeriesId === s.id
+                      ? "bg-amber-500/20 border border-amber-500/30 text-amber-400"
+                      : "bg-white/5 border border-transparent hover:bg-white/10 text-white/60"
+                  }`}
+                >
+                  {s.name}
+                </button>
+              ))}
+              {(!seriesList || seriesList.length === 0) && (
+                <p className="text-white/40 text-sm text-center py-4">暂无系列，请先在设定库中创建</p>
+              )}
+            </div>
+            <div className="flex gap-3">
+              <button
+                onClick={async () => {
+                  if (!selectedSeriesId) return
+                  await updateNovelMutation.mutateAsync({ id, seriesId: selectedSeriesId })
+                  toast.success(`已绑定到「${seriesList?.find(s => s.id === selectedSeriesId)?.name}」`)
+                  setBindSeriesModal(false)
+                  setSelectedSeriesId(null)
+                }}
+                disabled={!selectedSeriesId || updateNovelMutation.isPending}
+                className="flex-1 py-2.5 bg-amber-500 hover:bg-amber-400 disabled:opacity-30 text-[#111827] rounded-full font-medium text-sm transition-colors"
+              >
+                {updateNovelMutation.isPending ? <Loader2 className="w-4 h-4 animate-spin mx-auto" /> : "确认绑定"}
+              </button>
+              <button
+                onClick={() => { setBindSeriesModal(false); setSelectedSeriesId(null); }}
+                className="px-5 py-2.5 bg-white/5 hover:bg-white/10 rounded-full text-sm"
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -785,18 +1311,25 @@ function renderParagraphs(
   spacing: number,
   paragraphIndexOffset: number,
   onTextSelect: (paragraphIndex: number) => void,
-  annotationList?: AnnotationItem[] | null
+  annotationList?: AnnotationItem[] | null,
+  hoveredIndex?: number | null,
+  onHover?: (index: number | null) => void
 ) {
   const paragraphs = text.split(/\n\s*\n/).filter(p => p.trim().length > 0)
   return paragraphs.map((para, i) => {
     const pIdx = paragraphIndexOffset + i
     const paraAnnotations = annotationList?.filter(a => a.paragraphIndex === pIdx) || []
+    const isHovered = hoveredIndex === i
     return (
       <p
         key={i}
-        className="whitespace-pre-wrap select-text"
+        className={`whitespace-pre-wrap select-text rounded px-1 -mx-1 transition-colors ${
+          isHovered ? "bg-amber-500/10" : ""
+        }`}
         style={{ marginBottom: `${spacing}rem` }}
         onMouseUp={() => onTextSelect(pIdx)}
+        onMouseEnter={() => onHover?.(i)}
+        onMouseLeave={() => onHover?.(null)}
       >
         {renderHighlightedText(para.trim(), paraAnnotations)}
       </p>

@@ -70,13 +70,78 @@ const TONE_OPTIONS = [
   { value: "epic", label: "史诗壮阔" },
 ]
 
+const STEPS = [
+  { step: 1, label: "检索素材" },
+  { step: 2, label: "组装指令" },
+  { step: 3, label: "AI创作中" },
+  { step: 4, label: "保存作品" },
+]
+
+function GenerationStepper({ progress }: { progress: { step: number; message: string; completed?: boolean } }) {
+  const currentStep = progress.step
+  return (
+    <div className="mt-4 p-3 rounded-xl bg-white/5 border border-white/10">
+      <p className="text-xs font-mono text-white/50 mb-2 text-center">{progress.message}</p>
+      <div className="flex items-center justify-between">
+        {STEPS.map((s, i) => {
+          const isDone = currentStep > s.step || (progress.completed && currentStep >= s.step)
+          const isActive = currentStep === s.step && !progress.completed
+          return (
+            <div key={s.step} className="flex items-center flex-1">
+              <div className="flex flex-col items-center flex-1">
+                <div
+                  className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold transition-colors ${
+                    isDone
+                      ? "bg-green-500/20 text-green-400 border border-green-500/30"
+                      : isActive
+                      ? "bg-amber-500/20 text-amber-400 border border-amber-500/30 animate-pulse"
+                      : "bg-white/5 text-white/30 border border-white/10"
+                  }`}
+                >
+                  {isDone ? "✓" : s.step}
+                </div>
+                <span
+                  className={`text-[10px] mt-1 font-mono ${
+                    isDone ? "text-green-400/70" : isActive ? "text-amber-400/70" : "text-white/30"
+                  }`}
+                >
+                  {s.label}
+                </span>
+              </div>
+              {i < STEPS.length - 1 && (
+                <div
+                  className={`w-4 h-px ${
+                    currentStep > s.step ? "bg-green-500/30" : "bg-white/10"
+                  }`}
+                />
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export default function Studio() {
   const { workId } = useParams<{ workId: string }>()
   const utils = trpc.useUtils()
 
   const { data: seriesList } = trpc.lore.series.list.useQuery()
   const { data: novelList } = trpc.novel.list.useQuery()
-  const { data: worksList } = trpc.generate.list.useQuery()
+
+  // 历史作品搜索筛选状态
+  const [searchQuery, setSearchQuery] = useState("")
+  const [searchSeriesId, setSearchSeriesId] = useState<number | undefined>(undefined)
+  const [searchDays, setSearchDays] = useState<number | undefined>(undefined)
+  const [searchSortBy, setSearchSortBy] = useState<"createdAt" | "updatedAt" | "title">("createdAt")
+  const { data: worksList } = trpc.generate.search.useQuery({
+    query: searchQuery.trim() || undefined,
+    seriesId: searchSeriesId,
+    days: searchDays,
+    sortBy: searchSortBy,
+    limit: 20,
+  })
 
   const [selectedSeriesId, setSelectedSeriesId] = useState<number | null>(null)
   const [selectedParentNovelId, setSelectedParentNovelId] = useState<number | null>(null)
@@ -170,6 +235,10 @@ export default function Studio() {
   const [regenIndex, setRegenIndex] = useState<number | null>(null)
   const [regenBrief, setRegenBrief] = useState("")
 
+  // 生成进度可视化
+  const [genProgress, setGenProgress] = useState<{ step: number; message: string; completed?: boolean } | null>(null)
+  const progressIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+
   // 生成 mutation
   const generateMutation = trpc.generate.fanfiction.useMutation({
     onSuccess: () => {
@@ -212,6 +281,12 @@ export default function Studio() {
   const { data: loadedWork } = trpc.generate.getWork.useQuery(
     { id: parseInt(workId || "0", 10) },
     { enabled: !!workId && workId !== "undefined" }
+  )
+
+  // 查询当前生成作品的详情（用于展示自检结果）
+  const { data: currentWork } = trpc.generate.getWork.useQuery(
+    { id: generatedWorkId ?? 0 },
+    { enabled: generatedWorkId !== null }
   )
 
   // 系列切换时重置素材选择
@@ -322,6 +397,40 @@ export default function Studio() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [content])
 
+  // 键盘快捷键
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      const isMod = e.ctrlKey || e.metaKey
+
+      // Esc：关闭弹窗（按优先级）
+      if (e.key === "Escape") {
+        if (showRagPanel) { setShowRagPanel(false); return }
+        if (showFeedbackDetail) { setShowFeedbackDetail(false); return }
+        if (showStyleSampleModal) { setShowStyleSampleModal(false); return }
+      }
+
+      // Ctrl/Cmd + Enter：开始生成
+      if (isMod && e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault()
+        if (!isGenerating && selectedSeriesId && brief.trim()) {
+          handleGenerate()
+        }
+        return
+      }
+
+      // Ctrl/Cmd + S：保存作品
+      if (isMod && e.key === "s") {
+        e.preventDefault()
+        if (generatedWorkId) {
+          handleSave()
+        }
+        return
+      }
+    }
+    window.addEventListener("keydown", handleKeyDown)
+    return () => window.removeEventListener("keydown", handleKeyDown)
+  }, [isGenerating, selectedSeriesId, brief, generatedWorkId, showRagPanel, showFeedbackDetail, showStyleSampleModal])
+
   // 处理生成
   const handleGenerate = async () => {
     if (!selectedSeriesId || !brief.trim()) return
@@ -330,6 +439,25 @@ export default function Studio() {
     setDisplayContent("")
     setFeedbackState(null)
     setShowFeedbackDetail(false)
+
+    const taskId = crypto.randomUUID()
+    setGenProgress({ step: 0, message: "正在启动..." })
+
+    // 启动进度轮询
+    progressIntervalRef.current = setInterval(async () => {
+      try {
+        const p = await utils.client.generate.progress.query({ taskId })
+        if (p) {
+          setGenProgress({ step: p.step, message: p.message, completed: p.completed })
+          if (p.completed && progressIntervalRef.current) {
+            clearInterval(progressIntervalRef.current)
+            progressIntervalRef.current = null
+          }
+        }
+      } catch {
+        // 轮询失败静默处理
+      }
+    }, 1500)
 
     try {
       const result = await generateMutation.mutateAsync({
@@ -343,6 +471,7 @@ export default function Studio() {
         materialIds: selectedMaterialIds.length > 0 ? selectedMaterialIds : undefined,
         selectedCharacterIds: selectedCharacterIds.length > 0 ? selectedCharacterIds : undefined,
         selectedTropeIds: selectedTropeIds.length > 0 ? selectedTropeIds : undefined,
+        taskId,
       })
 
       setGeneratedWorkId(result.workId)
@@ -362,8 +491,13 @@ export default function Studio() {
       }
     } catch (error) {
       console.error("Generation failed:", error)
+      setGenProgress(prev => prev ? { ...prev, message: "生成失败", completed: true } : null)
     } finally {
       setIsGenerating(false)
+      if (progressIntervalRef.current) {
+        clearInterval(progressIntervalRef.current)
+        progressIntervalRef.current = null
+      }
     }
   }
 
@@ -624,10 +758,54 @@ export default function Studio() {
           <div className="flex-1 overflow-y-auto p-8">
             {activeTab === "history" ? (
               <div className="max-w-3xl mx-auto">
-                <h2 className="font-mono text-xs uppercase tracking-wider text-white/70 mb-6 flex items-center gap-2">
+                <h2 className="font-mono text-xs uppercase tracking-wider text-white/70 mb-4 flex items-center gap-2">
                   <Clock className="w-4 h-4" />
                   历史作品
                 </h2>
+
+                {/* 搜索 + 筛选 + 排序 */}
+                <div className="mb-6 space-y-2">
+                  <div className="flex gap-2">
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={e => setSearchQuery(e.target.value)}
+                      placeholder="搜索标题或简介..."
+                      className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-sm text-[#FDFBF5] placeholder:text-white/30"
+                    />
+                    <select
+                      value={searchSortBy}
+                      onChange={e => setSearchSortBy(e.target.value as "createdAt" | "updatedAt" | "title")}
+                      className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-[#FDFBF5] outline-none focus:border-amber-500"
+                    >
+                      <option value="createdAt">最近生成</option>
+                      <option value="updatedAt">最近修改</option>
+                      <option value="title">标题字母序</option>
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    <select
+                      value={searchSeriesId ?? ""}
+                      onChange={e => setSearchSeriesId(e.target.value ? Number(e.target.value) : undefined)}
+                      className="flex-1 px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-[#FDFBF5] outline-none focus:border-amber-500"
+                    >
+                      <option value="">全部系列</option>
+                      {seriesList?.map(s => (
+                        <option key={s.id} value={s.id}>{s.name}</option>
+                      ))}
+                    </select>
+                    <select
+                      value={searchDays ?? ""}
+                      onChange={e => setSearchDays(e.target.value ? Number(e.target.value) : undefined)}
+                      className="px-3 py-2 rounded-lg bg-white/5 border border-white/10 text-sm text-[#FDFBF5] outline-none focus:border-amber-500"
+                    >
+                      <option value="">全部时间</option>
+                      <option value={7}>最近7天</option>
+                      <option value={30}>最近30天</option>
+                    </select>
+                  </div>
+                </div>
+
                 {worksList?.length === 0 ? (
                   <div className="text-center text-white/60 py-20">
                     <BookOpen className="w-12 h-12 mx-auto mb-4 opacity-30" />
@@ -675,6 +853,32 @@ export default function Studio() {
               </div>
             ) : displayContent ? (
               <div className="max-w-3xl mx-auto space-y-4">
+                {/* 生成后自检结果 */}
+                {(() => {
+                  const sc = (currentWork?.parameters as Record<string, unknown> | undefined)?.selfCritique as { passed: boolean; issues: string[] } | undefined
+                  if (!sc) return null
+                  return sc.passed ? (
+                    <div className="flex items-center gap-2 px-4 py-2 rounded-lg bg-green-500/10 border border-green-500/20 text-green-400 text-sm">
+                      <Shield className="w-4 h-4" />
+                      <span>自检通过 — 未发现设定违规</span>
+                    </div>
+                  ) : (
+                    <div className="px-4 py-3 rounded-lg bg-red-500/10 border border-red-500/20">
+                      <div className="flex items-center gap-2 text-red-400 text-sm mb-2">
+                        <AlertCircle className="w-4 h-4" />
+                        <span>自检发现 {sc.issues.length} 处可能的问题：</span>
+                      </div>
+                      <ul className="space-y-1">
+                        {sc.issues.map((issue, i) => (
+                          <li key={i} className="text-red-300/80 text-xs pl-5 relative">
+                            <span className="absolute left-1.5 top-0.5">·</span>
+                            {issue}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )
+                })()}
                 {paragraphs.map((para, idx) => (
                   <div
                     key={idx}
@@ -1310,6 +1514,11 @@ export default function Studio() {
                 </>
               )}
             </button>
+
+            {/* 生成进度步骤条 */}
+            {genProgress && (
+              <GenerationStepper progress={genProgress} />
+            )}
           </div>
         </aside>
       </div>

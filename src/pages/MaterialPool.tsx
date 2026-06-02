@@ -63,8 +63,13 @@ export default function MaterialPool() {
     },
   })
 
-  const indexMutation = trpc.material.index.useMutation({
-    onSuccess: () => utils.material.list.invalidate(),
+  const indexAsyncMutation = trpc.material.indexAsync.useMutation({
+    onSuccess: (data) => {
+      setIndexJobId(data.jobId)
+    },
+    onError: (err) => {
+      toast.error(`索引启动失败：${err.message}`)
+    },
   })
 
   const parseFileMutation = trpc.material.parseFile.useMutation()
@@ -168,6 +173,7 @@ export default function MaterialPool() {
   const [showBatchExtractModal, setShowBatchExtractModal] = useState(false)
   const [batchExtractSeriesId, setBatchExtractSeriesId] = useState<number | null>(null)
   const [batchTaskId, setBatchTaskId] = useState<string | null>(null)
+  const [indexJobId, setIndexJobId] = useState<string | null>(null)
 
   // Single 模式拖拽上传
   const onDropSingle = useCallback((acceptedFiles: File[]) => {
@@ -193,6 +199,32 @@ export default function MaterialPool() {
       },
     }
   )
+
+  // 轮询异步索引进度
+  const { data: indexJobStatus } = trpc.material.indexAsyncStatus.useQuery(
+    { jobId: indexJobId! },
+    {
+      enabled: indexJobId !== null,
+      refetchInterval: (query) => {
+        const data = query.state.data
+        return data?.status === "running" ? 2000 : false
+      },
+    }
+  )
+
+  // 索引完成时自动刷新素材列表
+  useEffect(() => {
+    if (indexJobStatus?.status === "completed" || indexJobStatus?.status === "failed") {
+      utils.material.list.invalidate()
+      setIndexJobId(null)
+      if (indexJobStatus?.status === "completed") {
+        toast.success(`「${indexJobStatus.materialTitle}」索引完成，共 ${indexJobStatus.indexedChunks} 个 chunks`)
+      }
+      if (indexJobStatus?.status === "failed" && indexJobStatus.error) {
+        toast.error(`索引失败：${indexJobStatus.error}`)
+      }
+    }
+  }, [indexJobStatus])
 
   // 批量提取完成时自动刷新
   useEffect(() => {
@@ -716,13 +748,13 @@ export default function MaterialPool() {
                           onClick={() => {
                             if (m.status === "indexed") {
                               if (confirm(`「${m.title}」已索引 ${m.indexedChunks} 个 chunks，重新索引将覆盖现有向量数据，确认继续？`)) {
-                                indexMutation.mutate({ id: m.id })
+                                indexAsyncMutation.mutate({ id: m.id })
                               }
                             } else {
-                              indexMutation.mutate({ id: m.id })
+                              indexAsyncMutation.mutate({ id: m.id })
                             }
                           }}
-                          disabled={indexMutation.isPending}
+                          disabled={indexAsyncMutation.isPending || (indexJobStatus?.status === "running")}
                           className="p-2 rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-400"
                           title={m.status === "indexed" ? "重新索引（将覆盖现有数据）" : "开始索引"}
                         >
