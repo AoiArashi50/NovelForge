@@ -2,7 +2,7 @@ services:
   app:
     build: .
     ports:
-      - "8081:3000"
+      - "8086:3000"
     environment:
       - DATABASE_URL=postgresql://novelforge:${DB_PASSWORD}@db:5432/novelforge
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
