@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **NovelForge** (also referred to as NovelCraft AI) is an AI-powered novel translation and fan-fiction creation platform. It is strictly single-user, private, desktop-web-first, and deployed on Alibaba Cloud ECS via Docker Compose.
 
-All four implementation phases (0–3) are complete. The codebase contains a working React frontend, Hono + tRPC backend, PostgreSQL database with pgvector, and Docker deployment configuration. Design documents (frozen) live in `propmt/` and `ProjectGoal.md`.
+All four implementation phases (0–3) are complete. The codebase contains a working React frontend, Hono + tRPC backend, PostgreSQL database with pgvector, and Docker deployment configuration. Design documents (frozen) live in `docs/prompt/` and `docs/ProjectGoal.md`.
 
 **Active roadmap**: `docs/ROADMAP.md` contains the current iteration plan — RAG flywheel optimization (semantic chunking, source traceability, generated-content feedback loop, style auto-extraction). Agents should read it before starting new features.
 
@@ -14,14 +14,14 @@ All four implementation phases (0–3) are complete. The codebase contains a wor
 
 | File | Purpose |
 |------|---------|
-| `ProjectGoal.md` | **Highest authority.** Product overview, functional modules, data architecture, success criteria, and out-of-scope boundaries. |
-| `propmt/prompt .md` | Orchestration document. Tech stack freeze list, data flows, API contracts, phase roadmap. |
-| `propmt/prompt-phase0-foundation.md` | Initialization steps: scaffolding, PostgreSQL schema, Tailwind theme, routing. |
-| `propmt/prompt-phase1-core.md` | Core features: upload/parse, translation pipeline, reader, lore library. |
-| `propmt/prompt-phase2-cocreate.md` | Co-creation studio: AI generation, RAG retrieval, parameter controls. |
-| `propmt/prompt-phase3-polish.md` | Visual polish: animations, Three.js shader, Docker Compose, ECS deployment. |
+| `docs/ProjectGoal.md` | **Highest authority.** Product overview, functional modules, data architecture, success criteria, and out-of-scope boundaries. |
+| `docs/prompt/prompt .md` | Orchestration document. Tech stack freeze list, data flows, API contracts, phase roadmap. |
+| `docs/prompt/prompt-phase0-foundation.md` | Initialization steps: scaffolding, PostgreSQL schema, Tailwind theme, routing. |
+| `docs/prompt/prompt-phase1-core.md` | Core features: upload/parse, translation pipeline, reader, lore library. |
+| `docs/prompt/prompt-phase2-cocreate.md` | Co-creation studio: AI generation, RAG retrieval, parameter controls. |
+| `docs/prompt/prompt-phase3-polish.md` | Visual polish: animations, Three.js shader, Docker Compose, ECS deployment. |
 
-**Rule**: If implementation conflicts arise, `ProjectGoal.md` takes precedence over all other documents.
+**Rule**: If implementation conflicts arise, `docs/ProjectGoal.md` takes precedence over all other documents.
 
 ## Tech Stack
 
@@ -240,7 +240,7 @@ These constraints were discovered during implementation and must be respected:
 
 ## Key Constraints
 
-1. **ProjectGoal.md is the highest authority.** Any conflict → follow ProjectGoal.md.
+1. **docs/ProjectGoal.md is the highest authority.** Any conflict → follow docs/ProjectGoal.md.
 2. **No new dependencies.** The tech stack is frozen.
 3. **No StrictMode** in `main.tsx`.
 4. **Port 3000** for dev server.
@@ -341,7 +341,7 @@ Examples:
 - `fix(ui): correct dark theme background on Reader page`
 
 ### Frozen Document Change Policy
-`ProjectGoal.md` and all `propmt/*.md` files are **frozen**. If a change is absolutely necessary:
+`docs/ProjectGoal.md` and all `docs/prompt/*.md` files are **frozen**. If a change is absolutely necessary:
 - Use commit type `docs`.
 - Include "frozen-doc" in the subject and explain the reason.
 - Do **not** mix frozen-doc updates with code changes in the same commit.
