@@ -1,33 +1,41 @@
+# syntax=docker/dockerfile:1
+# ============================================================
+# NovelForge Production Dockerfile
+# Optimized with BuildKit cache mounts for faster rebuilds
+# ============================================================
+
 # Build stage
 FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Copy package files
+# 1. Install dependencies — cached when package.json unchanged
+#    BuildKit cache mount speeds up npm ci by reusing ~/.npm
 COPY package*.json ./
-RUN npm ci --legacy-peer-deps
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci --legacy-peer-deps
 
-# Copy source
+# 2. Copy source (filtered by .dockerignore — no node_modules, .git, uploads, docs)
 COPY . .
 
-# Build frontend (Vite bundle to dist/public/)
-RUN npm run build
+# 3. Build frontend (Vite) — cache Vite's internal cache
+RUN --mount=type=cache,target=/app/node_modules/.vite \
+    npm run build
 
-# Compile backend TypeScript to dist/ (boot.js, etc.)
-RUN npx tsc -b tsconfig.server.json
+# 4. Compile backend TypeScript — cache tsc incremental builds
+RUN --mount=type=cache,target=/app/.tsbuildinfo \
+    npx tsc -b tsconfig.server.json
 
-# Production stage
+# Production stage — only runtime files, no build tools
 FROM node:20-alpine AS runner
 
 WORKDIR /app
 
-# Copy built files
 COPY --from=builder /app/dist ./dist
 COPY --from=builder /app/package*.json ./
 COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/loader.mjs ./loader.mjs
 
-# Environment
 ENV NODE_ENV=production
 ENV PORT=3000
 
