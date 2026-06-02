@@ -61,6 +61,7 @@ export const series = pgTable("series", {
   name: varchar("name", { length: 200 }).notNull(),
   description: text("description"),
   universeName: varchar("universe_name", { length: 200 }),
+  styleFingerprint: jsonb("style_fingerprint"), // 从已有译文提取的风格特征
   createdAt: timestamp("created_at").notNull().defaultNow(),
 })
 
@@ -129,7 +130,17 @@ export const translationMemory = pgTable("translation_memory", {
   novelId: integer("novel_id"),
   seriesId: integer("series_id"),
   frequency: integer("frequency").notNull().default(1),
+  styleTag: varchar("style_tag", { length: 20 }), // "literal" | "fluent" | "literary"
   metadata: jsonb("metadata"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+})
+
+// Embedding 缓存（语义缓存层）
+export const embeddingCache = pgTable("embedding_cache", {
+  id: serial("id").primaryKey(),
+  textHash: varchar("text_hash", { length: 64 }).notNull().unique(),
+  textPreview: varchar("text_preview", { length: 200 }).notNull(),
+  embedding: jsonb("embedding").notNull(),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 })
 
@@ -238,5 +249,16 @@ export const ragFeedback = pgTable("rag_feedback", {
   content: text("content"),
   wasHelpful: boolean("was_helpful"),
   similarityScore: real("similarity_score"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+})
+
+// 操作审计日志（支持撤销）
+export const auditLogs = pgTable("audit_logs", {
+  id: serial("id").primaryKey(),
+  action: varchar("action", { length: 50 }).notNull(),
+  entityType: varchar("entity_type", { length: 50 }).notNull(),
+  entityId: integer("entity_id").notNull(),
+  snapshot: jsonb("snapshot").notNull(),
+  description: text("description"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 })
