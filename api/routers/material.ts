@@ -5,6 +5,7 @@ import { materials, translationMemory, vectorChunks, characterCards, worldBibles
 import { eq, desc, sql, and } from "drizzle-orm"
 import { tryFixTruncatedJson } from "../lib/json-utils"
 import { findPotentialDuplicates, type PotentialDuplicate, findDuplicateAspectGroups, mergeDuplicateAspects } from "../lib/dedup-utils"
+import { autoClassifyTranslationStyle } from "../services/style-analyzer"
 
 // ========== 批量提取异步任务状态（内存队列，单用户场景）==========
 
@@ -36,6 +37,33 @@ function cleanupOldTasks(maxAgeMs = 1000 * 60 * 60 * 2): void {
   for (const [id, task] of batchTasks) {
     if (task.startedAt.getTime() < cutoff) {
       batchTasks.delete(id)
+    }
+  }
+}
+
+// ========== 素材索引异步任务状态 ==========
+
+type IndexTaskStatus = "running" | "completed" | "failed"
+
+interface MaterialIndexTask {
+  id: string
+  status: IndexTaskStatus
+  materialId: number
+  materialTitle: string
+  indexedChunks: number
+  totalCandidates: number
+  error?: string
+  startedAt: Date
+  completedAt: Date | null
+}
+
+const materialIndexTasks = new Map<string, MaterialIndexTask>()
+
+function cleanupOldIndexTasks(maxAgeMs = 1000 * 60 * 60 * 2): void {
+  const cutoff = Date.now() - maxAgeMs
+  for (const [id, task] of materialIndexTasks) {
+    if (task.startedAt.getTime() < cutoff) {
+      materialIndexTasks.delete(id)
     }
   }
 }
@@ -305,7 +333,7 @@ ${content}`
     potentialDuplicates,
   }
 }
-import { getEmbedding, chatCompletion } from "../services/deepseek"
+import { getEmbeddingsBatch, chatCompletion } from "../services/deepseek"
 import { parseParallelCorpus } from "../services/parser"
 import { extractedLoreSchema } from "@contracts/schemas"
 import { indexNovel } from "../services/embedder"
@@ -317,6 +345,204 @@ function splitTextIntoParagraphs(text: string): string[] {
     .split(/\n\s*\n/)
     .map(p => p.trim())
     .filter(p => p.length > 0)
+}
+
+/**
+ * 执行素材索引核心逻辑
+ * 被同步 index 和异步 indexAsync 共用
+ */
+async function runIndexMaterial(
+  materialId: number,
+  task?: MaterialIndexTask
+): Promise<{ indexedCount: number; totalCandidates: number }> {
+  const db = getDb()
+
+  const [material] = await db
+    .select()
+    .from(materials)
+    .where(eq(materials.id, materialId))
+
+  if (!material) throw new Error("Material not found")
+  if (!material.content) throw new Error("Material has no content")
+
+  await db
+    .update(materials)
+    .set({ status: "indexing" })
+    .where(eq(materials.id, materialId))
+
+  if (task) {
+    task.status = "running"
+    task.materialTitle = material.title
+  }
+
+  // 清理该素材的历史索引，防止重复数据
+  await db.execute(sql`DELETE FROM vector_chunks WHERE metadata->>'materialId' = ${String(materialId)}`)
+  await db.execute(sql`DELETE FROM translation_memory WHERE metadata->>'materialId' = ${String(materialId)}`)
+
+  try {
+    let indexedCount = 0
+    let firstError = ""
+    let totalCandidates = 0
+
+    if (material.sourceType === "parallel_corpus") {
+      const pairs = parseParallelCorpus(material.content)
+      const validPairs = pairs.filter(
+        ({ source, translated }) => source.trim().length >= 10 && translated.trim().length >= 5
+      )
+      totalCandidates = validPairs.length
+
+      if (task) task.totalCandidates = totalCandidates
+
+      if (validPairs.length > 0) {
+        let embeddings: number[][] = []
+        try {
+          embeddings = await getEmbeddingsBatch(validPairs.map(p => p.source.trim()))
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          firstError = msg
+          console.error("Batch embedding failed for parallel corpus:", err)
+        }
+
+        const seenSource = new Set<string>()
+        const tmValues = []
+        const vcValues = []
+        for (let i = 0; i < validPairs.length; i++) {
+          const { source, translated } = validPairs[i]
+          const key = source.trim()
+          if (seenSource.has(key)) continue
+          seenSource.add(key)
+
+          const embedding = embeddings[i]
+          if (!embedding || embedding.length === 0) continue
+
+          const styleTag = autoClassifyTranslationStyle(key, translated.trim())
+          tmValues.push({
+            sourceText: key,
+            translatedText: translated.trim(),
+            embedding: embedding as unknown as number[],
+            seriesId: material.seriesId || null,
+            novelId: null,
+            frequency: 1,
+            styleTag,
+            metadata: { materialId: material.id },
+          })
+
+          vcValues.push({
+            content: key,
+            embedding: embedding as unknown as number[],
+            sourceType: "parallel_corpus",
+            seriesId: material.seriesId,
+            metadata: {
+              materialId: material.id,
+              materialTitle: material.title,
+              translatedText: translated.trim().slice(0, 200),
+              indexedAt: new Date().toISOString(),
+            },
+          })
+
+          indexedCount++
+          if (task) task.indexedChunks = indexedCount
+        }
+
+        if (tmValues.length > 0) {
+          await db.insert(translationMemory).values(tmValues)
+          await db.insert(vectorChunks).values(vcValues)
+        }
+      }
+    } else {
+      const chunks = splitIntoSemanticChunks(material.content, {
+        sourceId: material.id,
+        sourceTitle: material.title,
+      })
+      const validChunks = chunks.filter((c: Chunk) => c.content.trim().length >= 50)
+      totalCandidates = validChunks.length
+
+      if (task) task.totalCandidates = totalCandidates
+
+      if (validChunks.length > 0) {
+        let embeddings: number[][] = []
+        try {
+          embeddings = await getEmbeddingsBatch(validChunks.map(c => c.content.trim()))
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          firstError = msg
+          console.error("Batch embedding failed for chunks:", err)
+        }
+
+        const vcValues = []
+        for (let i = 0; i < validChunks.length; i++) {
+          const chunk = validChunks[i]
+          const embedding = embeddings[i]
+          if (!embedding || embedding.length === 0) continue
+
+          vcValues.push({
+            content: chunk.content,
+            embedding: embedding as unknown as number[],
+            sourceType: material.sourceType,
+            novelId: null,
+            seriesId: material.seriesId,
+            metadata: {
+              materialId: material.id,
+              materialTitle: material.title,
+              indexedAt: new Date().toISOString(),
+              sourceId: chunk.sourceId,
+              sourceTitle: chunk.sourceTitle,
+              chunkIndex: chunk.chunkIndex,
+              totalChunks: chunk.totalChunks,
+              contextBefore: chunk.contextBefore,
+              contextAfter: chunk.contextAfter,
+            },
+          })
+
+          indexedCount++
+          if (task) task.indexedChunks = indexedCount
+        }
+
+        if (vcValues.length > 0) {
+          await db.insert(vectorChunks).values(vcValues)
+        }
+      }
+    }
+
+    if (indexedCount === 0 && totalCandidates > 0 && firstError) {
+      await db
+        .update(materials)
+        .set({ status: "failed", indexedChunks: 0 })
+        .where(eq(materials.id, materialId))
+      if (task) {
+        task.status = "failed"
+        task.error = `索引失败: ${firstError}`
+        task.completedAt = new Date()
+      }
+      throw new Error(`索引失败: ${firstError}`)
+    }
+
+    await db
+      .update(materials)
+      .set({ status: "indexed", indexedChunks: indexedCount })
+      .where(eq(materials.id, materialId))
+
+    if (task) {
+      task.status = "completed"
+      task.indexedChunks = indexedCount
+      task.completedAt = new Date()
+    }
+
+    return { indexedCount, totalCandidates }
+  } catch (error) {
+    if (error instanceof Error && !error.message.startsWith("索引失败:")) {
+      await db
+        .update(materials)
+        .set({ status: "failed" })
+        .where(eq(materials.id, materialId))
+    }
+    if (task) {
+      task.status = "failed"
+      task.error = error instanceof Error ? error.message : String(error)
+      task.completedAt = new Date()
+    }
+    throw error
+  }
 }
 
 export const materialRouter = createRouter({
@@ -445,132 +671,75 @@ export const materialRouter = createRouter({
       }
     }),
 
+  // 同步索引（适用于小素材，大素材请用 indexAsync）
   index: publicQuery
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
-      const db = getDb()
+      const { indexedCount } = await runIndexMaterial(input.id)
+      return { success: true, indexedChunks: indexedCount }
+    }),
 
+  // 异步索引（后台执行，立即返回 jobId，适合大素材）
+  indexAsync: publicQuery
+    .input(z.object({ id: z.number() }))
+    .mutation(async ({ input }) => {
+      cleanupOldIndexTasks()
+
+      const db = getDb()
       const [material] = await db
         .select()
         .from(materials)
         .where(eq(materials.id, input.id))
 
-      if (!material) throw new Error("Material not found")
-      if (!material.content) throw new Error("Material has no content")
+      if (!material) throw new Error("素材不存在")
+      if (!material.content) throw new Error("素材内容为空")
 
-      await db
-        .update(materials)
-        .set({ status: "indexing" })
-        .where(eq(materials.id, input.id))
+      const taskId = generateTaskId()
+      const task: MaterialIndexTask = {
+        id: taskId,
+        status: "running",
+        materialId: input.id,
+        materialTitle: material.title,
+        indexedChunks: 0,
+        totalCandidates: 0,
+        startedAt: new Date(),
+        completedAt: null,
+      }
+      materialIndexTasks.set(taskId, task)
 
-      try {
-        let indexedCount = 0
-        let firstError = ""
-        let totalCandidates = 0
-
-        if (material.sourceType === "parallel_corpus") {
-          const pairs = parseParallelCorpus(material.content)
-          totalCandidates = pairs.length
-
-          for (const { source, translated } of pairs) {
-            if (source.trim().length < 10 || translated.trim().length < 5) continue
-
-            try {
-              const embedding = await getEmbedding(source)
-
-              await db.insert(translationMemory).values({
-                sourceText: source.trim(),
-                translatedText: translated.trim(),
-                embedding: embedding as unknown as number[],
-                seriesId: material.seriesId || null,
-                novelId: null,
-                frequency: 1,
-                metadata: { materialId: material.id },
-              })
-
-              await db.insert(vectorChunks).values({
-                content: source.trim(),
-                embedding: embedding as unknown as number[],
-                sourceType: "parallel_corpus",
-                seriesId: material.seriesId,
-                metadata: {
-                  materialId: material.id,
-                  materialTitle: material.title,
-                  translatedText: translated.trim().slice(0, 200),
-                  indexedAt: new Date().toISOString(),
-                },
-              })
-
-              indexedCount++
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err)
-              if (!firstError) firstError = msg
-              console.error("Parallel pair embedding failed:", err)
-            }
-          }
-        } else {
-          const chunks = splitIntoSemanticChunks(material.content, {
-            sourceId: material.id,
-            sourceTitle: material.title,
-          })
-          totalCandidates = chunks.filter((c: Chunk) => c.content.trim().length >= 50).length
-
-          for (const chunk of chunks) {
-            if (chunk.content.trim().length < 50) continue
-
-            try {
-              const embedding = await getEmbedding(chunk.content)
-
-              await db.insert(vectorChunks).values({
-                content: chunk.content,
-                embedding: embedding as unknown as number[],
-                sourceType: material.sourceType,
-                novelId: null,
-                seriesId: material.seriesId,
-                metadata: {
-                  materialId: material.id,
-                  materialTitle: material.title,
-                  indexedAt: new Date().toISOString(),
-                  sourceId: chunk.sourceId,
-                  sourceTitle: chunk.sourceTitle,
-                  chunkIndex: chunk.chunkIndex,
-                  totalChunks: chunk.totalChunks,
-                  contextBefore: chunk.contextBefore,
-                  contextAfter: chunk.contextAfter,
-                },
-              })
-
-              indexedCount++
-            } catch (err) {
-              const msg = err instanceof Error ? err.message : String(err)
-              if (!firstError) firstError = msg
-              console.error("Chunk embedding failed:", err)
-            }
-          }
+      // 后台执行，不 await
+      Promise.resolve().then(async () => {
+        try {
+          await runIndexMaterial(input.id, task)
+        } catch (err) {
+          console.error("[indexAsync] background indexing failed:", err)
         }
+      })
 
-        if (indexedCount === 0 && totalCandidates > 0 && firstError) {
-          await db
-            .update(materials)
-            .set({ status: "failed", indexedChunks: 0 })
-            .where(eq(materials.id, input.id))
-          throw new Error(`索引失败: ${firstError}`)
+      return { jobId: taskId }
+    }),
+
+  // 查询异步索引任务状态
+  indexAsyncStatus: publicQuery
+    .input(z.object({ jobId: z.string() }))
+    .query(async ({ input }) => {
+      const task = materialIndexTasks.get(input.jobId)
+      if (!task) {
+        return {
+          found: false as const,
+          status: "failed" as const,
+          message: "任务不存在或已过期（任务保留2小时）",
         }
+      }
 
-        await db
-          .update(materials)
-          .set({ status: "indexed", indexedChunks: indexedCount })
-          .where(eq(materials.id, input.id))
-
-        return { success: true, indexedChunks: indexedCount }
-      } catch (error) {
-        if (error instanceof Error && !error.message.startsWith("索引失败:")) {
-          await db
-            .update(materials)
-            .set({ status: "failed" })
-            .where(eq(materials.id, input.id))
-        }
-        throw error
+      return {
+        found: true as const,
+        status: task.status,
+        materialTitle: task.materialTitle,
+        indexedChunks: task.indexedChunks,
+        totalCandidates: task.totalCandidates,
+        error: task.error,
+        completedAt: task.completedAt,
       }
     }),
 
@@ -578,6 +747,19 @@ export const materialRouter = createRouter({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = getDb()
+
+      // 记录删除前的快照
+      const [material] = await db.select().from(materials).where(eq(materials.id, input.id))
+      if (material) {
+        const { logAudit } = await import("../routers/audit")
+        await logAudit({
+          action: "material_delete",
+          entityType: "material",
+          entityId: input.id,
+          snapshot: material as unknown as Record<string, unknown>,
+          description: `删除素材《${material.title}》`,
+        })
+      }
 
       await db.execute(sql`DELETE FROM vector_chunks WHERE metadata->>'materialId' = ${String(input.id)}`)
       await db.execute(sql`DELETE FROM translation_memory WHERE metadata->>'materialId' = ${String(input.id)}`)
