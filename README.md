@@ -174,16 +174,34 @@ A: 数据库数据保存在 Docker Volume `pgdata` 中。备份命令：
 
 ## 分支策略
 
-| 分支 | 用途 |
-|------|------|
-| `master` | 稳定版本，随时可部署 |
-| `dev` | 日常开发，功能合并后定期合并到 master |
+| 分支 | 用途 | 稳定性 |
+|------|------|--------|
+| `master` | **生产部署分支** — ECS 服务器从此分支拉取构建 | 必须稳定 |
+| `dev` | **开发分支** — 日常开发、功能验证 | 允许不稳定 |
 
-新功能请从 `dev` 切出 feature 分支：
+### 工作流程
+
+```
+feat/xxx  功能开发 → 合并到 dev → 本地测试通过 → 合并到 master → ECS 部署
+```
+
+### 发布流程
+
+1. 在 `dev` 分支开发完成，本地测试通过
+2. 创建 Pull Request：`dev` → `master`（或直接合并）
+3. `master` 打标签：`git tag -a v0.x.x`
+4. ECS 服务器拉取 `master` 最新代码并重新部署
+
+### 新功能开发
 
 ```bash
+# 从 dev 切出功能分支
 git checkout dev
-git checkout -b feat/your-feature
+git checkout -b feat/xxx
+
+# 开发完成，合并回 dev
+git checkout dev
+git merge feat/xxx
 ```
 
 ---
