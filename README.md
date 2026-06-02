@@ -78,6 +78,96 @@ chmod +x start.sh
 
 ---
 
+## 个人服务器部署（极简命令行）
+
+如果你有一台云服务器（阿里云/腾讯云/Vultr 等），想要把 NovelForge 部署到云端并随时随地访问：
+
+### 1. 购买服务器
+- **配置**：2核4G 起步
+- **系统**：Ubuntu 22.04
+- **安全组**：开放 `22`、`80`、`443`、`3000`
+
+### 2. SSH 连接服务器，执行一键部署
+
+```bash
+# 下载并执行部署脚本（自动安装 Docker + 拉取代码 + 配置 + 启动）
+curl -fsSL https://raw.githubusercontent.com/AoiArashi50/NovelForge/master/deploy.sh | sudo bash
+```
+
+脚本会交互式询问你的 API Key，填完后自动启动。
+
+### 3. 访问
+```
+http://你的服务器IP:3000
+```
+
+### 4. 配置域名 + SSL（可选）
+
+```bash
+# 安装 Nginx
+apt install -y nginx
+
+# 创建反向代理配置
+cat > /etc/nginx/sites-available/novelforge << 'EOF'
+server {
+    listen 80;
+    server_name yourdomain.com;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+EOF
+
+ln -s /etc/nginx/sites-available/novelforge /etc/nginx/sites-enabled/
+nginx -s reload
+
+# 申请 SSL（需先安装 certbot）
+certbot --nginx -d yourdomain.com
+```
+
+### 5. 本地数据迁移到云端
+
+**本地导出**：
+```bash
+cd /你的本地项目路径
+./backup.sh full-export
+# 生成 backup/migrate_xxx.tar.gz
+```
+
+**上传到服务器**：
+```bash
+scp backup/migrate_xxx.tar.gz root@服务器IP:/opt/novelforge/backup/
+```
+
+**云端导入**：
+```bash
+ssh root@服务器IP
+cd /opt/novelforge
+./backup.sh full-import backup/migrate_xxx.tar.gz
+```
+
+### 常用维护命令
+
+```bash
+ssh root@服务器IP
+cd /opt/novelforge
+
+# 查看日志
+docker compose logs -f
+
+# 手动备份
+./backup.sh export
+
+# 更新到最新版本
+git pull origin master
+docker compose down
+docker compose up -d
+```
+
+---
+
 ## 环境变量配置
 
 复制 `.env.example` 为 `.env`，填写以下必填项：
