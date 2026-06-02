@@ -13,7 +13,7 @@ WORKDIR /app
 #    BuildKit cache mount speeds up npm ci by reusing ~/.npm
 COPY package*.json ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci --legacy-peer-deps
+    npm install --legacy-peer-deps
 
 # 2. Copy source (filtered by .dockerignore — no node_modules, .git, uploads, docs)
 COPY . .
