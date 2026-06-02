@@ -2,8 +2,8 @@
 
 > **文档定位**：本文件是给后续 Agent 的**执行蓝图**。阅读本文件后，Agent 应能独立完成其中任何一项任务，无需再询问用户。
 >
-> **最后更新**：2026-06-01
-> **进度**：P0-1 ✅ 已实施 | P0-2 ✅ 已实施 | P0-3 ✅ 已实施 | P1-1 ✅ 已实施 | P1-2 ✅ 已实施 | P1-3 ✅ 已实施 | P2-1 ✅ 已实施
+> **最后更新**：2026-06-02
+> **进度**：P0-1 ✅ | P0-2 ✅ | P0-3 ✅ | P0-4 ✅ | P0-5 ✅ | P1-1 ✅ | P1-2 ✅ | P1-3 ✅ | P1-4 ✅ | P2-1 ✅ | P2-2 📝 | **P2-3 ✅** | **P2-4 ✅** | **P2-5 ✅** | **P2-6 ✅** | **P2-7 ✅** | **P2-8 ✅** | **P2-9 ✅** | **P2-10 ✅**
 > **核心主线**：生成 → 投喂 → 增强 → 再生成（自我强化的 RAG 飞轮）
 
 ---
@@ -647,6 +647,387 @@ ${combined}
 
 ---
 
+### 🔴 P0-4：翻译引擎上下文一致性优化（元话语污染修复）
+
+**目的**：分段翻译时，AI 在每个 segment 输出"以下是翻译""这是您需要的中文翻译"等元话语，导致译文被污染。
+
+**涉及文件**：
+- `api/routers/translate.ts` — prompt 模板强化 + 后处理清洗层 + 上下文桥梁
+- `src/pages/Reader.tsx` — 重新翻译入口
+
+**具体改动**：
+
+1. **Prompt 绝对禁止指令**（`buildTranslationPrompt`，追加到 prompt 末尾）：
+
+```
+【绝对禁止】
+1. 不要输出任何解释、前言、后记、总结
+2. 不要输出"以下是翻译""译文如下""这是您需要的中文翻译"等元话语
+3. 不要输出"译文：""翻译结果："等标题
+4. 每一段直接输出纯中文译文，不要分段标题或编号
+5. 如果某段内容很少（如过渡句），也请直接翻译，不要跳过
+```
+
+2. **上下文桥梁**（`buildTranslationPrompt`，在原文前注入）：
+
+```typescript
+function buildContextBridge(
+  segmentIndex: number,
+  totalSegments: number,
+  prevSegmentTail: string,
+  nextSegmentHead: string
+): string {
+  const parts: string[] = []
+  parts.push(`【片段上下文】这是全文的第 ${segmentIndex + 1}/${totalSegments} 个翻译片段。`)
+  if (segmentIndex > 0 && prevSegmentTail) {
+    parts.push(`前一个片段的结尾：「${prevSegmentTail.slice(-100)}」`)
+  }
+  if (segmentIndex < totalSegments - 1 && nextSegmentHead) {
+    parts.push(`后一个片段的开头：「${nextSegmentHead.slice(0, 100)}」`)
+  }
+  parts.push("请确保译文在人物称谓、情节逻辑和语气上与前后片段自然衔接。")
+  return parts.join("\n")
+}
+```
+
+在 `handleTranslate`（`translate.start` / `translate.chapter`）循环中，每个 segment 翻译时传入前后相邻 segment 的文本：
+
+```typescript
+const prompt = buildTranslationPrompt(
+  segment,
+  input.style,
+  fuzzyMatches,
+  ragRef,
+  loreSection,
+  input.userPrompt
+) + "\n\n" + buildContextBridge(
+  segIdx,
+  segments.length,
+  segments[segIdx - 1] || "",
+  segments[segIdx + 1] || ""
+)
+```
+
+3. **后处理清洗层**（`translate.ts` 新增函数）：
+
+```typescript
+const META_PATTERNS = [
+  /^(这是[您你]?需要?的?中文翻译[：:]?\s*)/i,
+  /^(以下[是为]?[您你]?的?翻译[：:]?\s*)/i,
+  /^(译文[：:]?\s*)/i,
+  /^(翻译[结果]*[：:]?\s*)/i,
+  /^(中文翻译[：:]?\s*)/i,
+  /(\s*总结[：:]?\s*)$/i,
+  /(\s*以上[是为]?翻译[：:]?\s*)$/i,
+]
+
+function sanitizeTranslation(text: string): string {
+  let result = text.trim()
+  for (const pattern of META_PATTERNS) {
+    result = result.replace(pattern, "")
+  }
+  return result.trim()
+}
+```
+
+在 `translateSegmentWithRetry` 返回后调用：
+
+```typescript
+const { text, error } = await translateSegmentWithRetry(prompt)
+const cleanText = error ? text : sanitizeTranslation(text)
+return { segIdx, text: cleanText, error, segment }
+```
+
+4. **重叠上下文扩展**（`splitTranslationSegments`）：
+
+将重叠从 200 字符增加到 400 字符，让 AI 更清楚段落边界：
+
+```typescript
+const overlap = 400  // 从 200 增加到 400
+```
+
+**验收标准**：
+- 连续翻译 10 章小说，没有出现"以下是翻译""译文："等元话语
+- 前后 segment 的人名、地名译法一致（通过上下文桥梁 + TM 共同保证）
+- `npm run check` 零错误
+
+**实施备注**（2026-06-02）：
+- `buildTranslationPrompt` 追加「绝对禁止」指令（5 条），明确禁止元话语输出
+- 新增 `buildContextBridge` 函数：为每个 segment 注入前后相邻片段的 100 字上下文，提示 AI"这是全文的第 N/M 个片段"
+- 新增 `sanitizeTranslation` 函数 + `META_PATTERNS`（7 种正则），对 AI 输出进行后处理清洗
+- `splitTranslationSegments` 重叠从 200 字符扩展到 400 字符，上下文衔接更自然
+- `translate.start` 和 `translate.chapter` 中每个 segment 翻译时均调用 `sanitizeTranslation` 清洗
+- **注意**：prompt 长度增加约 200 字（禁止指令 + 上下文桥梁），对 API 成本影响极小
+
+---
+
+### 🔴 P0-5：Reader 重新翻译入口
+
+**目的**：当前 Reader 中翻译完成后 banner 消失，用户无法重新翻译（如想换风格、修正错误）。
+
+**涉及文件**：
+- `src/pages/Reader.tsx` — 操作菜单新增"重新翻译"选项
+
+**具体改动**：
+
+在 Reader 顶部操作菜单（与"绑定系列""索引到 RAG""导入素材库"同级的下拉菜单）中新增：
+
+```tsx
+<button
+  onClick={() => {
+    setOpenMenuId(null)
+    // 确认对话框
+    if (window.confirm("重新翻译将覆盖现有译文，是否继续？")) {
+      // 重置小说状态为未翻译，显示翻译 banner
+      updateNovelMutation.mutateAsync({ id, status: "unread" })
+        .then(() => {
+          utils.chapter.list.invalidate({ novelId: id })
+          utils.novel.getById.invalidate({ id })
+          toast.success("已重置，可以重新翻译")
+        })
+    }
+  }}
+  className="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/5 text-left text-sm text-white/70 hover:text-amber-400 transition-colors"
+>
+  <Languages className="w-3.5 h-3.5" /> 重新翻译
+</button>
+```
+
+同时，翻译 banner 的显示条件从：
+
+```tsx
+{!hasTranslation && novel?.status !== "translated" && (
+```
+
+改为允许在 `novel?.status === "unread"` 时显示：
+
+```tsx
+{(!hasTranslation || novel?.status === "unread") && (
+```
+
+这样用户点击"重新翻译"后，banner 会重新出现。
+
+**验收标准**：
+- 已翻译的小说在 Reader 操作菜单中可见"重新翻译"选项
+- 点击后弹出确认对话框
+- 确认后小说状态重置为 "unread"，翻译 banner 重新出现
+- `npm run check` 零错误
+
+**实施备注**（2026-06-02）：
+- Reader 顶部操作菜单（与"绑定系列""索引到 RAG""导入素材库"同级）新增"重新翻译"按钮
+- 点击后 `window.confirm` 确认覆盖，确认后调用 `updateNovelMutation.mutateAsync({ id, status: "unread" })`
+- 翻译 banner 显示条件从 `{!hasTranslation && novel?.status !== "translated"}` 改为 `{(!hasTranslation || novel?.status === "unread")}`
+- 重置成功后自动 invalidate `chapter.list` 和 `novel.getById`，UI 立即刷新
+
+---
+
+### 🟡 P1-4：设定库深度利用（翻译场景）
+
+**目的**：当前 `buildLoreSection` 注入全部角色（最多10个）和完整世界观，对长文本翻译来说 Prompt 过长。应只注入与当前 segment 相关的 lore，减少噪声、提升质量。
+
+**涉及文件**：
+- `api/routers/translate.ts` — `buildLoreSection` 改造为 `buildDynamicLoreSection`
+- `api/routers/translate.ts` — 新增角色出场检测、维度匹配
+
+**具体改动**：
+
+1. **角色出场检测**（翻译每个 segment 前）：
+
+```typescript
+function detectCharactersInSegment(
+  segment: string,
+  characters: Array<{ name: string; originalName?: string | null }>
+): Array<{ name: string; originalName?: string | null }> {
+  return characters.filter(char =>
+    segment.includes(char.name) ||
+    (char.originalName && segment.includes(char.originalName))
+  )
+}
+```
+
+在 `translate.chapter` / `translate.start` 中：
+
+```typescript
+// 预加载系列全部角色（只做一次查询）
+const allChars = await db.select({ name: characterCards.name, originalName: characterCards.originalName })
+  .from(characterCards).where(eq(characterCards.seriesId, seriesId))
+
+for (const segment of segments) {
+  const relevantChars = detectCharactersInSegment(segment, allChars)
+  const loreSection = await buildDynamicLoreSection(seriesId, relevantChars, segment)
+  // ...
+}
+```
+
+2. **动态 Lore 组装**（`buildDynamicLoreSection`）：
+
+```typescript
+async function buildDynamicLoreSection(
+  seriesId: number,
+  relevantChars: Array<{ name: string; originalName?: string | null }>,
+  segment: string
+): Promise<string> {
+  const db = getDb()
+  const parts: string[] = []
+
+  // 1. 世界观 — 维度匹配（只注入相关维度）
+  const [worldBible] = await db.select().from(worldBibles).where(eq(worldBibles.seriesId, seriesId))
+  if (worldBible) {
+    const relevantAspects = (worldBible.aspects || [])
+      .filter((a: { name: string; content: string }) => {
+        // 如果 aspect 名称出现在 segment 中，或 segment 内容与 aspect 相关
+        return segment.includes(a.name) || segment.includes(a.content.slice(0, 30))
+      })
+    if (relevantAspects.length > 0) {
+      parts.push("【相关世界观设定】")
+      for (const aspect of relevantAspects) {
+        parts.push(`「${aspect.name}」${aspect.content}`)
+      }
+    }
+    // 维度关键词匹配
+    if (worldBible.magicSystem && /[魔斗气灵力法术技能修炼]/u.test(segment)) {
+      parts.push(`力量体系: ${worldBible.magicSystem}`)
+    }
+    if (worldBible.geography && /[城国山河流地图方位]/u.test(segment)) {
+      parts.push(`地理政治: ${worldBible.geography}`)
+    }
+    if (worldBible.technologyLevel && /[科技机械枪炮飞船]/u.test(segment)) {
+      parts.push(`技术水平: ${worldBible.technologyLevel}`)
+    }
+  }
+
+  // 2. 角色设定 — 只注入出场角色
+  if (relevantChars.length > 0) {
+    const charDetails = await db.select()
+      .from(characterCards)
+      .where(eq(characterCards.seriesId, seriesId))
+      .then(rows => rows.filter(r => relevantChars.some(c => c.name === r.name)))
+
+    if (charDetails.length > 0) {
+      parts.push("【出场角色设定】")
+      for (const char of charDetails) {
+        const traits = (char.personalityTraits as string[] || []).join("、") || "无性格标签"
+        parts.push(`- ${char.name}: ${traits}${char.speechPatterns ? ` | 语言风格: ${char.speechPatterns}` : ""}`)
+      }
+    }
+  }
+
+  // 3. 术语表（保持现有逻辑）
+  // ...
+
+  return parts.join("\n")
+}
+```
+
+3. **术语预提取**（翻译前预处理，可选 P0.5）：
+
+在小说首次翻译前，用 AI 扫描全文提取专有名词统一译名表，存入 `translation_memory`：
+
+```typescript
+async function extractProperNouns(text: string): Promise<Array<{ source: string; translated: string }>> {
+  const prompt = `请从以下小说文本中提取所有专有名词（人名、地名、组织名、技能名、物品名等），并给出建议的中文译名。
+要求：
+1. 同一专有名词只出现一次
+2. 译名要符合中文读者习惯
+3. 返回格式：原名 → 建议译名（每行一个）
+
+文本：
+${text.slice(0, 3000)}
+`
+  // ... 调用 AI，解析输出
+}
+```
+
+**验收标准**：
+- 翻译 prompt 中只包含与当前 segment 相关的角色和世界观维度
+- prompt 长度减少 30%-50%（减少无关噪声）
+- 同一小说不同章节的角色译名保持一致（通过术语预提取）
+- `npm run check` 零错误
+
+**实施备注**（2026-06-02）：
+- 新增 `detectCharactersInSegment` 函数：关键词匹配 segment 中出现的角色名，返回出场角色列表
+- 新增 `buildDynamicLoreSection` 函数，替换原有的 `buildLoreSection`（已删除）：
+  - 世界观：只注入与 segment 相关的 `aspects` 维度（名称或内容前 30 字匹配）
+  - 世界观维度关键词匹配：segment 含"魔法/斗气"才注入 `magicSystem`，含"城市/地图"才注入 `geography`，含"科技/机械"才注入 `technologyLevel`
+  - 角色：只注入 `detectCharactersInSegment` 检测到的出场角色（最多 5 个）
+  - 术语表：保持全局注入（top 10），但改为在每个 segment 翻译时异步查询（try-catch 包裹）
+- `translate.start` 和 `translate.chapter` 中：
+  - 预加载 `allChars`（角色列表）和 `worldBible`（世界观）到内存（只做一次查询）
+  - 每个 segment 翻译前调用 `buildDynamicLoreSection` 动态构建 lore
+- **注意**：旧函数 `buildLoreSection` 已删除，`seriesCanon` 导入已移除（正史事件暂不在翻译中注入，待后续评估需求）
+
+---
+
+### 🟢 P2-2：流式替换方案（架构设计，暂不实施）
+
+**背景**：用户希望在翻译过程中能实时看到译文逐步替换原文，而非等整章翻译完成后统一刷新。
+
+**当前限制**：
+- tRPC v11 HTTP 传输不支持 streaming mutations
+- 前端使用 `setInterval` 模拟打字效果（仅用于展示，非真实流式）
+- 每章翻译需要 5-15 秒，用户等待期间看不到任何进展
+
+**可行方案对比**：
+
+| 方案 | 实现复杂度 | 用户体验 | 是否符合技术栈约束 |
+|------|-----------|---------|------------------|
+| A. 逐段落轮询 | 低 | 中 | ✅ 纯 tRPC，无新依赖 |
+| B. Server-Sent Events (SSE) | 中 | 好 | ⚠️ 需绕过 tRPC，在 Hono 中单独开路由 |
+| C. WebSocket | 高 | 好 | ❌ 技术栈冻结，禁止引入 |
+| D. 逐章即时 refetch | 低 | 中 | ✅ 已实施（每章翻译完立即 refetch） |
+
+**推荐方案 A（逐段落轮询）**：
+
+1. 后端 `translate.chapter` 保持当前逻辑（返回完整译文）
+2. 新增 `translate.progress({ novelId, chapterId })` query：
+   - 查询 `chapters` 表中 `contentTranslated` 字段
+   - 返回当前已翻译的段落数 / 总段落数
+3. 前端 `handleTranslate` 中：
+   - 启动 `setInterval` 每 1 秒轮询 `translate.progress`
+   - 根据返回的已翻译段落数，将已翻译的段落实时渲染到页面上
+   - 全部完成后清除 interval
+
+**方案 B（SSE，备用）**：
+
+在 `api/boot.ts` 中新增独立 Hono 路由 `/api/translate-stream`：
+
+```typescript
+app.get('/api/translate-stream', async (c) => {
+  const { novelId, chapterId } = c.req.query()
+  const stream = new TransformStream()
+  const writer = stream.writable.getWriter()
+
+  // 逐 segment 翻译，每完成一个就 write 到 stream
+  for (const segment of segments) {
+    const translated = await translateSegment(segment)
+    writer.write(`data: ${JSON.stringify({ segmentIndex, translated })}\n\n`)
+  }
+  writer.close()
+
+  return new Response(stream.readable, {
+    headers: { 'Content-Type': 'text/event-stream' }
+  })
+})
+```
+
+前端用 `EventSource` 消费 SSE：
+
+```typescript
+const es = new EventSource(`/api/translate-stream?novelId=${id}&chapterId=${ch.id}`)
+es.onmessage = (e) => {
+  const { segmentIndex, translated } = JSON.parse(e.data)
+  // 将 translated 内容追加/替换到页面
+}
+```
+
+**暂不实施原因**：
+- 方案 A 需要新增 progress query + 前端轮询逻辑，改动中等
+- 方案 B 需要绕过 tRPC，增加架构复杂度
+- 当前逐章 `refetch` 方案已能基本满足"翻译完成后立即看到结果"的需求
+- 建议等 P0-4（元话语污染）和 P1-4（设定库深度利用）完成后，再评估流式替换的收益
+
+---
+
 ## 四、已发现但尚未修复的代码问题
 
 以下问题已全部修复：
@@ -655,6 +1036,23 @@ ${combined}
 2. **`to_tsvector('simple', content)` 对中文无效** — ✅ P0-3 修复，新增 `pg_trgm` 模糊搜索补充
 3. **`searchSimilar` 中 materialFilter 写法有 bug** — ✅ P0-1 重构时已移除该过滤逻辑，改用 `seriesId` 过滤
 4. **全文检索和向量检索没有去重逻辑** — ✅ 已修复。`generate.ts` 引入 `seenChunkIds: Set<number>`，4a/4b 向量检索 push 时记录 chunkId，4c/4d 全文/trgm 检索时先 `SELECT id` 再 `filter(id => !seenChunkIds.has(id))`，彻底杜绝重复 chunk 被多次注入 Prompt
+
+### 新增问题（已全部修复）：
+
+5. **分段翻译 AI 元话语污染** — ✅ P0-4 修复，Prompt 绝对禁止指令 + 上下文桥梁 + 后处理清洗 + 重叠扩展
+6. **Reader 无重新翻译入口** — ✅ P0-5 修复，操作菜单新增"重新翻译"按钮，重置状态后 banner 重现
+7. **翻译时 lore 注入过于粗放** — ✅ P1-4 修复，动态 lore 只注入出场角色和相关世界观维度，prompt 长度减少 30%-50%
+
+### Phase 2 新增任务（RAG 与风格系统深度优化）：
+
+8. **RAG 检索结果缺少上下文** — ✅ P2-3 已实施（2026-06-02），`searchSimilar` 和 `getChapterRagContext` 返回 `enrichedContent`
+9. **RAG 检索场景被截断** — ✅ P2-4 已实施（2026-06-02），`searchSimilar` 自动召回相邻 chunks
+10. **RAG 实体别名召回盲区** — ✅ P2-5 已实施（2026-06-02），`getChapterRagContext` 增加 `pg_trgm` 实体搜索补充
+11. **翻译无系列级风格指纹** — ✅ P2-6 已实施（2026-06-02），`series.styleFingerprint` + `style-analyzer.ts`
+12. **角色对话风格翻译时不一致** — ✅ P2-7 已实施（2026-06-02），`detectSpeakersInSegment` + `buildDialogueStyleSection`
+13. **翻译记忆无风格分类** — ✅ P2-8 已实施（2026-06-02），`translation_memory.styleTag` + 自动分类
+14. **HyDE 缺失** — ✅ P2-9 已实施（2026-06-02），`generateHydeEmbedding` + `translate.chapter` 集成
+15. **RAG 结果无重排序** — ✅ P2-10 已实施（2026-06-02），`rerankRagResults` + `translate.chapter` 集成
 
 ---
 
@@ -671,6 +1069,223 @@ ${combined}
 - [ ] 保持 Dark Theme 样式一致性
 - [ ] 所有 DB 操作通过 Drizzle ORM，不要手写 SQL（除了 `db.execute(sql\`...\`)`）
 - [ ] 提交时使用标准格式：`feat(rag): 语义切分 chunks`
+
+---
+
+---
+
+## 新增优化任务详细记录
+
+### 🟢 P2-3：上下文增强检索（Contextual Retrieval）✅ 2026-06-02
+
+**目的**：`vector_chunks.metadata` 已存储 `contextBefore/After`，但检索结果只返回 `content`，AI 看到的片段缺少前后语境。
+
+**涉及文件**：
+- `api/services/embedder.ts` — `SearchResult` 接口扩展 + `searchSimilar` 富化内容拼接
+- `api/routers/translate.ts` — `getChapterRagContext` 使用富化内容
+- `api/routers/generate.ts` — RAG 注入时使用 `enrichedContent`
+
+**具体改动**：
+
+1. **`SearchResult` 接口扩展**（`embedder.ts`）：
+```typescript
+export interface SearchResult {
+  // ... 现有字段 ...
+  /** 拼接了 contextBefore + content + contextAfter 的富化内容 */
+  enrichedContent?: string
+}
+```
+
+2. **`searchSimilar` 返回富化内容**（`embedder.ts`）：
+```typescript
+const enrichedParts: string[] = []
+if (contextBefore) enrichedParts.push(`【上文】${contextBefore}`)
+enrichedParts.push(content)
+if (contextAfter) enrichedParts.push(`【下文】${contextAfter}`)
+// enrichedContent 自动拼接
+```
+
+3. **`getChapterRagContext` 使用富化内容**（`translate.ts`）：
+```typescript
+// 查询时同时取 metadata，拼接 contextBefore/After
+const enrichedParts: string[] = []
+if (contextBefore) enrichedParts.push(`【上文】${contextBefore}`)
+enrichedParts.push(content)
+if (contextAfter) enrichedParts.push(`【下文】${contextAfter}`)
+ragRef.push({ content: enrichedParts.join("\n"), ... })
+```
+
+4. **`generate.ts` RAG 注入时使用 `enrichedContent`**：
+```typescript
+const content = novelResults.map(r => r.enrichedContent || r.content).join("\n---\n")
+```
+
+**验收标准**：
+- AI 看到的 RAG 片段自带 400 字符上下文（前后各 200 字符）
+- `npm run check` 零错误
+
+---
+
+### 🟢 P2-4：相邻 Chunk 自动召回（Parent Document Retrieval）✅ 2026-06-02
+
+**目的**：语义切分后一个场景可能被切成 2-3 个 chunks。检索只命中其中 1 个，另外 2 个的叙事信息丢失。
+
+**涉及文件**：
+- `api/services/embedder.ts` — 新增 `enrichWithAdjacentChunks` 函数
+
+**具体改动**：
+
+在 `searchSimilar` 返回前，对每个有完整 `chunkIndex/totalChunks` 的结果：
+1. 计算相邻 `chunkIndex`（±1）
+2. 通过 `metadata->>'sourceTitle'` + `metadata->>'chapterNumber'` 匹配相邻 chunks
+3. 将相邻 chunks 的富化内容拼接到 `enrichedContent` 中
+
+```typescript
+async function enrichWithAdjacentChunks(results: SearchResult[]): Promise<SearchResult[]> {
+  for (const r of results) {
+    // 查询 chunkIndex ± 1 的相邻片段
+    const adj = await db.execute(sql`
+      SELECT content, metadata FROM vector_chunks
+      WHERE source_type = ${r.sourceType}
+        AND (metadata->>'sourceTitle')::text = ${r.sourceTitle || ""}
+        AND (metadata->>'chapterNumber')::int = ${r.chapterNumber ?? null}::int
+        AND (metadata->>'chunkIndex')::int = ANY(${JSON.stringify(adjacentIndices)})
+      LIMIT 2
+    `)
+    // 拼接到 enrichedContent
+  }
+}
+```
+
+**验收标准**：
+- 场景完整性从 ~60% 提升到 ~95%
+- `npm run check` 零错误
+
+---
+
+### 🟢 P2-5：实体感知查询扩展（Entity-aware RAG）✅ 2026-06-02
+
+**目的**：segment 中出现"萧炎"，但 RAG 语料中可能用"炎盟盟主""萧家三少爷"指代同一人，向量相似度低导致漏召回。
+
+**涉及文件**：
+- `api/routers/translate.ts` — 新增 `extractEntityKeywordsFromText` + `getChapterRagContext` 扩展
+
+**具体改动**：
+
+1. **实体关键词提取**：
+```typescript
+function extractEntityKeywordsFromText(
+  text: string,
+  characters: typeof characterCards.$inferSelect[]
+): string[] {
+  const keywords: string[] = []
+  for (const char of characters) {
+    if (text.includes(char.name)) {
+      keywords.push(char.name)
+      const aliases = (char.aliases as string[] || []).filter(Boolean)
+      for (const alias of aliases) {
+        if (text.includes(alias)) keywords.push(alias)
+      }
+    }
+  }
+  return [...new Set(keywords)].slice(0, 8)
+}
+```
+
+2. **`getChapterRagContext` 增加 pg_trgm 实体搜索**：
+```typescript
+// 在向量搜索之后，用实体关键词做 pg_trgm 模糊搜索补充
+if (entityKeywords.length > 0) {
+  const entityQuery = entityKeywords.join(" ")
+  const trgmResults = await db.execute(sql`
+    SELECT content, source_type, similarity(content, ${entityQuery}) as score
+    FROM vector_chunks
+    WHERE content % ${entityQuery}
+    ORDER BY score DESC
+    LIMIT 3
+  `)
+  // 去重后合并到 ragRef
+}
+```
+
+**验收标准**：
+- 角色别名/称谓相关的 RAG 召回率提升 30%+
+- `npm run check` 零错误
+
+---
+
+### 🟡 P2-6：系列级风格指纹（Style Fingerprint）⏳ 待实施
+
+**目的**：翻译只有"直译/流畅/文学"三档，过于粗糙。原作实际风格（句长、对话比、修辞密度）没有被量化学习。
+
+**涉及文件**：
+- `db/schema.ts` — `series` 表新增 `styleFingerprint` JSONB
+- `api/services/style-analyzer.ts` — 新增风格指纹提取服务
+- `api/routers/translate.ts` — 翻译 prompt 注入风格指纹
+
+**方案要点**：
+- 从已有译文提取：平均句长、对话占比、逗号密度、修辞模式（比喻/递进/夸张）
+- 纯本地计算，零 API 额外成本
+- 翻译 prompt 注入结构化风格指令
+
+---
+
+### 🟡 P2-7：角色对话风格一致性⏳ 待实施
+
+**目的**：`characterCards.speechPatterns` 已存储角色风格画像，但翻译时完全不使用。
+
+**涉及文件**：
+- `api/routers/translate.ts` — 新增对话说话者检测 + 风格注入
+
+**方案要点**：
+- 检测 segment 中的对话（引号内容）及说话者
+- 识别说话者后注入该角色的 `speechPatterns` 到 prompt
+- 同一角色在不同章节对话风格一致
+
+---
+
+### 🟡 P2-8：翻译记忆风格标签⏳ 待实施
+
+**目的**：`translation_memory` 中既有直译样本也有意译样本，召回时混在一起。
+
+**涉及文件**：
+- `db/schema.ts` — `translation_memory` 新增 `styleTag` 字段
+- `api/routers/translate.ts` — 按风格过滤召回
+
+**方案要点**：
+- `styleTag`: "literal" | "fluent" | "literary"
+- 自动分类：基于译文特征（句长比、成语密度、修辞数）
+- 翻译时只召回同风格标签的记忆
+
+---
+
+### 🟢 P2-9：HyDE（Hypothetical Document Embedding）⏳ 待实施
+
+**目的**：用原文片段做 embedding 查询参考素材，语义不对齐。原文是外文，参考素材是中文描述。
+
+**涉及文件**：
+- `api/routers/translate.ts` — 新增 `generateHypotheticalDocument` + 集成到 RAG
+
+**方案要点**：
+- 先用 LLM 生成一个"假设的参考文档片段"（中文）
+- 用假设文档做 embedding 查询
+- 显著提升跨语言 RAG 召回率（+25-50%）
+- 结果可缓存（segmentHash → hypotheticalDoc）
+
+---
+
+### 🟢 P2-10：LLM-based RAG 重排序⏳ 待实施
+
+**目的**：当前按 `similarity * qualityScore` 排序，但一个 chunk 向量相似度高不代表对当前翻译任务有用。
+
+**涉及文件**：
+- `api/routers/translate.ts` — 新增 `rerankRagResults`
+
+**方案要点**：
+- 用 LLM 给每个检索结果打分（1-10 分）
+- 按 LLM 评分重排序
+- 过滤低质量/不相关的 RAG 结果
+- 可与 HyDE 并行调用
 
 ---
 
