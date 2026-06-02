@@ -60,6 +60,21 @@ export const novelRouter = createRouter({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = getDb()
+
+      // 记录删除前的快照（用于撤销）
+      const [novel] = await db.select().from(novels).where(eq(novels.id, input.id))
+      const chapterList = await db.select().from(chapters).where(eq(chapters.novelId, input.id))
+      if (novel) {
+        const { logAudit } = await import("../routers/audit")
+        await logAudit({
+          action: "novel_delete",
+          entityType: "novel",
+          entityId: input.id,
+          snapshot: { novel, chapters: chapterList },
+          description: `删除小说《${novel.title}》及 ${chapterList.length} 个章节`,
+        })
+      }
+
       // 先删除关联章节
       await db.delete(chapters).where(eq(chapters.novelId, input.id))
       await db.delete(novelTags).where(eq(novelTags.novelId, input.id))
@@ -221,6 +236,110 @@ export const novelRouter = createRouter({
       }
 
       return { imported: results.length, results }
+    }),
+
+  // 将小说导入素材库（已翻译→双语平行语料，未翻译→参考小说）
+  importToMaterial: publicQuery
+    .input(z.object({ novelId: z.number() }))
+    .mutation(async ({ input }) => {
+      const db = getDb()
+
+      const [novel] = await db
+        .select()
+        .from(novels)
+        .where(eq(novels.id, input.novelId))
+
+      if (!novel) throw new Error("小说不存在")
+
+      const chapterList = await db
+        .select()
+        .from(chapters)
+        .where(eq(chapters.novelId, input.novelId))
+        .orderBy(chapters.chapterNumber)
+
+      if (chapterList.length === 0) throw new Error("小说没有章节")
+
+      // 检查是否有翻译内容
+      const hasTranslation = chapterList.some(
+        ch => ch.contentTranslated && ch.contentTranslated.trim().length > 0
+      )
+
+      if (hasTranslation) {
+        // ========== 已翻译：导入为双语平行语料 ==========
+        const pairs: string[] = []
+        for (const ch of chapterList) {
+          const sourceParas = (ch.contentOriginal || "")
+            .split(/\n\s*\n/)
+            .map(p => p.trim())
+            .filter(p => p.length > 0)
+          const translatedParas = (ch.contentTranslated || "")
+            .split(/\n\s*\n/)
+            .map(p => p.trim())
+            .filter(p => p.length > 0)
+          const pairCount = Math.min(sourceParas.length, translatedParas.length)
+          for (let i = 0; i < pairCount; i++) {
+            pairs.push(`${sourceParas[i]}\n===\n${translatedParas[i]}`)
+          }
+        }
+
+        if (pairs.length === 0) {
+          // 标记为已翻译但无有效对照对，回退到单语
+          const fullText = chapterList
+            .map(ch => ch.contentOriginal)
+            .filter(Boolean)
+            .join("\n\n")
+          if (!fullText) throw new Error("小说内容为空")
+
+          const [material] = await db.insert(materials).values({
+            title: novel.title || `小说 #${novel.id}`,
+            content: fullText,
+            sourceType: "reference",
+            seriesId: novel.seriesId || undefined,
+            description: `从小说库导入：${novel.title}（无有效译文对照）`,
+            status: "pending",
+          }).returning()
+
+          return { materialId: material.id, title: material.title, chapterCount: chapterList.length, sourceType: "reference" as const }
+        }
+
+        const bilingualContent = pairs.join("\n\n===\n\n")
+
+        const [material] = await db.insert(materials).values({
+          title: novel.title || `小说 #${novel.id}`,
+          content: bilingualContent,
+          sourceType: "parallel_corpus",
+          seriesId: novel.seriesId || undefined,
+          description: `从小说库导入的双语平行语料：${novel.title}（${pairs.length} 对段落）`,
+          status: "pending",
+        }).returning()
+
+        return {
+          materialId: material.id,
+          title: material.title,
+          chapterCount: chapterList.length,
+          sourceType: "parallel_corpus" as const,
+          pairCount: pairs.length,
+        }
+      } else {
+        // ========== 未翻译：导入为参考小说 ==========
+        const fullText = chapterList
+          .map(ch => ch.contentOriginal)
+          .filter(Boolean)
+          .join("\n\n")
+
+        if (!fullText) throw new Error("小说内容为空")
+
+        const [material] = await db.insert(materials).values({
+          title: novel.title || `小说 #${novel.id}`,
+          content: fullText,
+          sourceType: "reference",
+          seriesId: novel.seriesId || undefined,
+          description: `从小说库导入的参考小说：${novel.title}`,
+          status: "pending",
+        }).returning()
+
+        return { materialId: material.id, title: material.title, chapterCount: chapterList.length, sourceType: "reference" as const }
+      }
     }),
 
   // Tag operations

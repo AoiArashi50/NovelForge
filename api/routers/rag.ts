@@ -2,7 +2,7 @@ import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
 import { vectorChunks, chapters, novels, ragFeedback } from "@db/schema"
-import { eq } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { indexNovel, searchSimilar } from "../services/embedder"
 
 export const ragRouter = createRouter({
@@ -82,6 +82,29 @@ export const ragRouter = createRouter({
       await db.update(ragFeedback)
         .set({ wasHelpful: input.wasHelpful })
         .where(eq(ragFeedback.generationId, input.generationId))
+
+      // 同步更新对应 vector_chunks 的 qualityScore（👍 +0.3，👎 -0.3）
+      const delta = input.wasHelpful ? 0.3 : -0.3
+      const feedbacks = await db
+        .select()
+        .from(ragFeedback)
+        .where(eq(ragFeedback.generationId, input.generationId))
+
+      for (const fb of feedbacks) {
+        if (!fb.chunkId) continue
+        await db.execute(sql`
+          UPDATE vector_chunks
+          SET metadata = jsonb_set(
+            COALESCE(metadata, '{}'),
+            '{qualityScore}',
+            to_jsonb(LEAST(2.0, GREATEST(0.1,
+              COALESCE((metadata->>'qualityScore')::real, 1.0) + ${delta}
+            )))
+          )
+          WHERE id = ${fb.chunkId}
+        `)
+      }
+
       return { success: true }
     }),
 })
