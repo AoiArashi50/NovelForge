@@ -50,7 +50,7 @@ docker compose -f docker-compose.image.yml pull
 docker compose -f docker-compose.image.yml up -d
 
 # 4. 打开浏览器访问
-open http://localhost:3000
+open http://localhost:3002
 ```
 
 #### 方式 B：本地构建（如需修改源码）
@@ -62,7 +62,7 @@ open http://localhost:3000
 docker compose -f docker-compose.simple.yml up -d --build
 
 # 4. 打开浏览器访问
-open http://localhost:3000
+open http://localhost:3002
 ```
 
 ### Windows 用户
@@ -98,7 +98,7 @@ curl -fsSL https://raw.githubusercontent.com/AoiArashi50/NovelForge/master/deplo
 
 ### 3. 访问
 ```
-http://你的服务器IP:3000
+http://你的服务器IP:3002
 ```
 
 ### 4. 配置域名 + SSL（可选）
@@ -113,7 +113,7 @@ server {
     listen 80;
     server_name yourdomain.com;
     location / {
-        proxy_pass http://127.0.0.1:3000;
+        proxy_pass http://127.0.0.1:3002;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
@@ -267,7 +267,7 @@ npm run build
 
 ## 常见问题
 
-**Q: 启动后访问 localhost:3000 显示空白？**
+**Q: 启动后访问 localhost:3002 显示空白？**
 A: 首次启动需要等待数据库初始化（约 10-30 秒）。查看日志：`docker compose -f docker-compose.simple.yml logs -f`
 
 **Q: 翻译时提示 API 错误？**

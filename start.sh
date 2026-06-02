@@ -105,14 +105,14 @@ echo -e "${GREEN}OK${NC}"
 # 5. 等待并确认
 echo -n "[5/5] 等待服务就绪 ... "
 sleep 5
-if curl -s http://localhost:3000/api/health > /dev/null 2>&1; then
+if curl -s http://localhost:3002/api/health > /dev/null 2>&1; then
     echo -e "${GREEN}OK${NC}"
     echo ""
     echo -e "${GREEN}✅ NovelForge 启动成功！${NC}"
     echo ""
     echo "访问地址:"
-    echo "  🌐 前端界面: http://localhost:3000"
-    echo "  🔧 健康检查: http://localhost:3000/api/health"
+    echo "  🌐 前端界面: http://localhost:3002"
+    echo "  🔧 健康检查: http://localhost:3002/api/health"
     echo "  🗄️  数据库:   localhost:15432 (PostgreSQL + pgvector)"
     echo ""
     echo "常用命令:"
@@ -123,7 +123,7 @@ if curl -s http://localhost:3000/api/health > /dev/null 2>&1; then
 else
     echo -e "${YELLOW}服务启动中，请稍等 10-30 秒${NC}"
     echo ""
-    echo "等待数据库初始化完成，稍后访问: http://localhost:3000"
+    echo "等待数据库初始化完成，稍后访问: http://localhost:3002"
     echo ""
     echo "查看实时日志:"
     echo "  docker compose -f ${COMPOSE_FILE} logs -f"

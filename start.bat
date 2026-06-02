@@ -106,7 +106,7 @@ echo [√] 服务已启动
 echo [5/5] 等待服务就绪 ...
 timeout /t 5 /nobreak >nul
 
-curl -s http://localhost:3000/api/health >nul 2>&1
+curl -s http://localhost:3002/api/health >nul 2>&1
 if not errorlevel 1 (
     echo [√] 服务已就绪
     echo.
@@ -115,8 +115,8 @@ if not errorlevel 1 (
     echo ═══════════════════════════════════════
     echo.
     echo 访问地址：
-    echo   🌐 前端界面: http://localhost:3000
-    echo   🔧 健康检查: http://localhost:3000/api/health
+    echo   🌐 前端界面: http://localhost:3002
+    echo   🔧 健康检查: http://localhost:3002/api/health
     echo   🗄️  数据库:   localhost:15432
     echo.
     echo 常用命令：
@@ -126,11 +126,11 @@ if not errorlevel 1 (
     echo.
     echo 按任意键在浏览器中打开 ...
     pause >nul
-    start http://localhost:3000
+    start http://localhost:3002
 ) else (
     echo [!] 服务启动中，请稍等 10-30 秒
     echo.
-    echo 稍后访问: http://localhost:3000
+    echo 稍后访问: http://localhost:3002
     echo.
     echo 查看实时日志：
     echo   docker compose -f %COMPOSE_FILE% logs -f

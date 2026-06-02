@@ -11,14 +11,14 @@
 #   1. 复制 .env.example 为 .env，填写 API Key
 #   2. docker compose -f docker-compose.image.yml pull
 #   3. docker compose -f docker-compose.image.yml up -d
-#   4. 打开 http://localhost:3000
+#   4. 打开 http://localhost:3002
 
 services:
   app:
     image: ghcr.io/aoiarashi50/novelforge:master
     pull_policy: always
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       - DATABASE_URL=postgresql://novelforge:${DB_PASSWORD}@db:5432/novelforge
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
@@ -35,7 +35,7 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3002/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3

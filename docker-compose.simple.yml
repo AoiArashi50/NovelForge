@@ -1,5 +1,5 @@
 # NovelForge — 简化版 Docker Compose（本地 Build）
-# 不包含 nginx，应用直接暴露在 http://localhost:3000
+# 不包含 nginx，应用直接暴露在 http://localhost:3002
 #
 # ⚡ 如果你希望跳过本地 Build，直接拉取预编译镜像（30 秒启动）：
 #    docker compose -f docker-compose.image.yml up -d
@@ -7,7 +7,7 @@
 # 使用方式：
 #   1. 复制 .env.example 为 .env，填写 API Key
 #   2. docker compose -f docker-compose.simple.yml up -d
-#   3. 打开 http://localhost:3000
+#   3. 打开 http://localhost:3002
 
 services:
   app:
@@ -15,7 +15,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "3000:3000"
+      - "3002:3000"
     environment:
       - DATABASE_URL=postgresql://novelforge:${DB_PASSWORD}@db:5432/novelforge
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
@@ -32,7 +32,7 @@ services:
       db:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/api/health"]
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3002/api/health"]
       interval: 30s
       timeout: 10s
       retries: 3
