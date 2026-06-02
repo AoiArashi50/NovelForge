@@ -545,7 +545,7 @@ export default function Reader() {
 
       {/* Settings Panel */}
       {showSettings && (
-        <div className={`max-w-[800px] mx-auto px-6 pt-4`}>
+        <div className={`max-w-[800px] mx-auto px-4 md:px-6 pt-4`}>
           <div className={`p-5 rounded-xl ${cardBg} border ${borderColor} space-y-5`}>
             <div className="flex items-center justify-between">
               <h3 className={`font-mono text-xs uppercase tracking-wider ${subTextColor}`}>阅读设置</h3>
@@ -625,7 +625,7 @@ export default function Reader() {
 
       {/* Translation banner */}
       {(!hasTranslation || novel?.status === "unread") && (
-        <div className={`max-w-[800px] mx-auto px-6 pt-4`}>
+        <div className={`max-w-[800px] mx-auto px-4 md:px-6 pt-4`}>
           <div className={`p-4 rounded-xl bg-amber-500/10 border border-amber-500/20`}>
             {translateProgress?.isTranslating ? (
               <div className="space-y-3">
@@ -743,7 +743,7 @@ export default function Reader() {
       <div className="flex relative">
         {/* Chapter sidebar */}
         {showSidebar && (
-          <aside className={`fixed left-0 top-[7.5rem] bottom-0 w-72 ${cardBg} border-r ${borderColor} overflow-y-auto z-40 transition-colors`}>
+          <aside className={`fixed left-0 top-[7.5rem] bottom-0 w-full sm:w-72 ${cardBg} border-r ${borderColor} overflow-y-auto z-40 transition-colors`}>
             <div className="p-4">
               <div className="flex items-center justify-between mb-4">
                 <h3 className={`font-mono text-xs uppercase tracking-wider ${subTextColor}`}>章节列表</h3>
@@ -793,7 +793,7 @@ export default function Reader() {
 
         {/* Bookmarks sidebar */}
         {showBookmarks && (
-          <aside className={`fixed right-0 top-[7.5rem] bottom-0 w-72 ${cardBg} border-l ${borderColor} overflow-y-auto z-40 transition-colors`}>
+          <aside className={`fixed right-0 top-[7.5rem] bottom-0 w-full sm:w-72 ${cardBg} border-l ${borderColor} overflow-y-auto z-40 transition-colors`}>
             <div className="p-4">
               <div className="flex items-center justify-between mb-4">
                 <h3 className={`font-mono text-xs uppercase tracking-wider ${subTextColor}`}>我的书签</h3>
@@ -835,7 +835,7 @@ export default function Reader() {
 
         {/* Annotations sidebar */}
         {showAnnotations && (
-          <aside className={`fixed right-0 top-[7.5rem] bottom-0 w-80 ${cardBg} border-l ${borderColor} overflow-y-auto z-40 transition-colors`}>
+          <aside className={`fixed right-0 top-[7.5rem] bottom-0 w-full sm:w-80 ${cardBg} border-l ${borderColor} overflow-y-auto z-40 transition-colors`}>
             <div className="p-4">
               <div className="flex items-center justify-between mb-4">
                 <h3 className={`font-mono text-xs uppercase tracking-wider ${subTextColor}`}>批注列表</h3>
@@ -878,7 +878,7 @@ export default function Reader() {
           </aside>
         )}
 
-        <main className="flex-1 max-w-[800px] mx-auto px-6 py-8">
+        <main className="flex-1 max-w-[800px] mx-auto px-4 md:px-6 py-8">
           {currentChapter ? (
             <article
               style={{

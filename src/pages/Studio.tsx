@@ -668,12 +668,12 @@ export default function Studio() {
   return (
     <div className="min-h-screen bg-[#111827] text-[#FDFBF5]">
       <NavBar />
-      <div className="flex h-[calc(100vh-3.5rem)]">
+      <div className="flex flex-col md:flex-row h-[calc(100vh-3.5rem)]">
         {/* 左侧编辑区 */}
         <div className="flex-1 flex flex-col min-w-0">
           {/* 草稿恢复横幅 */}
           {showDraftBanner && draftInfo && (
-            <div className="shrink-0 px-6 py-2.5 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between">
+            <div className="shrink-0 px-4 md:px-6 py-2.5 bg-amber-500/10 border-b border-amber-500/20 flex items-center justify-between">
               <div className="flex items-center gap-2 text-sm">
                 <Clock className="w-4 h-4 text-amber-400" />
                 <span className="text-white/70">
@@ -697,14 +697,14 @@ export default function Studio() {
             </div>
           )}
           {/* 顶部操作栏 */}
-          <header className="h-14 border-b border-white/10 flex items-center justify-between px-6 bg-[#111827]/90 backdrop-blur-md">
-            <div className="flex items-center gap-3">
-              <PenTool className="w-4 h-4 text-amber-500" />
+          <header className="h-14 border-b border-white/10 flex items-center justify-between px-4 md:px-6 bg-[#111827]/90 backdrop-blur-md">
+            <div className="flex items-center gap-3 min-w-0 flex-1">
+              <PenTool className="w-4 h-4 text-amber-500 shrink-0" />
               <input
                 value={title}
                 onChange={e => setTitle(e.target.value)}
                 placeholder="作品标题"
-                className="bg-transparent text-sm font-serif outline-none placeholder:text-white/40 w-64 text-[#FDFBF5]"
+                className="bg-transparent text-sm font-serif outline-none placeholder:text-white/40 w-full md:w-64 text-[#FDFBF5] min-w-0"
               />
             </div>
             <div className="flex items-center gap-2">
@@ -755,7 +755,7 @@ export default function Studio() {
           </header>
 
           {/* 编辑画布 */}
-          <div className="flex-1 overflow-y-auto p-8">
+          <div className="flex-1 overflow-y-auto p-4 md:p-8">
             {activeTab === "history" ? (
               <div className="max-w-3xl mx-auto">
                 <h2 className="font-mono text-xs uppercase tracking-wider text-white/70 mb-4 flex items-center gap-2">
@@ -1052,7 +1052,7 @@ export default function Studio() {
         </div>
 
         {/* 右侧 AI 控制面板 */}
-        <aside className="w-[360px] border-l border-white/10 bg-[#111827]/95 backdrop-blur-md overflow-y-auto">
+        <aside className="w-full md:w-[360px] border-l border-white/10 bg-[#111827]/95 backdrop-blur-md overflow-y-auto">
           <div className="p-6 space-y-6">
             {/* 系列选择 */}
             <div>
@@ -1092,7 +1092,7 @@ export default function Studio() {
                 <Wand2 className="w-3.5 h-3.5" />
                 创作模式
               </label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {MODE_OPTIONS.map(opt => (
                   <button
                     key={opt.value}
@@ -1425,7 +1425,7 @@ export default function Studio() {
                 <Music className="w-3.5 h-3.5" />
                 氛围
               </label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                 {TONE_OPTIONS.map(opt => (
                   <button
                     key={opt.value}

@@ -354,7 +354,7 @@ export default function MaterialPool() {
   return (
     <div className="min-h-screen bg-[#111827] text-[#FDFBF5]">
       <NavBar />
-      <div className="max-w-[1200px] mx-auto px-8 py-8">
+      <div className="max-w-[1200px] mx-auto px-4 md:px-8 py-8">
         <div className="flex items-center justify-between mb-8">
           <div>
             <div className="flex items-center gap-3 mb-2">
@@ -375,7 +375,7 @@ export default function MaterialPool() {
           <div className="mb-8 p-6 rounded-2xl bg-white/5 border border-white/10 space-y-5">
             <div>
               <label className="block font-mono text-xs uppercase tracking-wider text-white/70 mb-3">素材类型</label>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                 {SOURCE_TYPES.map(({ value, label, desc, icon: Icon }) => (
                   <button key={value} onClick={() => setSourceType(value as typeof sourceType)}
                     className={`p-4 rounded-xl border text-left transition-colors ${
@@ -405,7 +405,7 @@ export default function MaterialPool() {
               </div>
             )}
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block font-mono text-xs text-white/70 mb-2">标题</label>
                 <input value={title} onChange={e => setTitle(e.target.value)}
@@ -425,7 +425,7 @@ export default function MaterialPool() {
             </div>
 
             {sourceType === "parallel_corpus" && uploadMode === "dual" ? (
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <div className="relative flex items-center justify-between mb-2">
                     <label className="font-mono text-xs text-white/70 flex items-center gap-1">
@@ -923,7 +923,7 @@ export default function MaterialPool() {
                               <span className="font-serif font-semibold text-amber-400">{char.name}</span>
                             </div>
                             {selectedCharIndexes.has(idx) && (
-                              <div className="grid grid-cols-2 gap-3 pl-7">
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pl-7">
                                 <div>
                                   <label className="block font-mono text-xs text-white/50 mb-1">别名（逗号分隔）</label>
                                   <input
@@ -1049,7 +1049,7 @@ export default function MaterialPool() {
                     </div>
                     {saveWorldBible && (
                       <div className="pl-7 space-y-3">
-                        <div className="grid grid-cols-2 gap-3">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                           <div>
                             <label className="block font-mono text-xs text-white/50 mb-1">地理环境</label>
                             <textarea

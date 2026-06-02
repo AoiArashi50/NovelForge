@@ -24,14 +24,14 @@ export default function Home() {
       <NavBar />
       <HeroBackground />
 
-      <div className="relative max-w-[1400px] mx-auto px-8 py-16">
+      <div className="relative max-w-[1400px] mx-auto px-4 md:px-8 py-16">
         <header className="mb-16">
-          <div className="flex items-center justify-between p-4 rounded-full bg-white/[0.03] backdrop-blur-md border border-white/10 max-w-2xl mx-auto">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 p-4 rounded-full bg-white/[0.03] backdrop-blur-md border border-white/10 max-w-2xl mx-auto">
             <span className="font-mono text-xs text-white/50 flex items-center gap-2">
               <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
               System • Translation Memory Active
             </span>
-            <div className="flex gap-2">
+            <div className="flex gap-2 flex-wrap">
               {[
                 { label: "翻译", path: "/library" },
                 { label: "二创", path: "/studio" },

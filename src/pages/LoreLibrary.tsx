@@ -461,7 +461,7 @@ export default function LoreLibrary() {
   return (
     <div className="min-h-screen bg-[#111827] text-[#FDFBF5]">
       <NavBar />
-      <div className="max-w-[1400px] mx-auto px-8 py-8">
+      <div className="max-w-[1400px] mx-auto px-4 md:px-8 py-8">
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-3xl font-serif font-bold">设定库</h1>
@@ -478,7 +478,7 @@ export default function LoreLibrary() {
 
         {showSeriesForm && (
           <div className="mb-8 p-6 rounded-xl bg-white/5 border border-white/10">
-            <div className="grid grid-cols-3 gap-4 mb-4">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
               <div>
                 <label className="block font-mono text-xs text-white/50 mb-2">系列名称</label>
                 <input value={seriesName} onChange={e => setSeriesName(e.target.value)} className="w-full px-4 py-2 rounded-lg bg-white/5 border border-white/10 focus:border-amber-500 outline-none text-[#FDFBF5]" placeholder="如：玄幻修仙系列" />
@@ -2134,7 +2134,7 @@ function CharFormFields({ control }: { control: import("react-hook-form").Contro
 
   return (
     <>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {renderField("name", "角色名 *")}
         {renderField("age", "年龄", "如：18岁")}
       </div>

@@ -363,7 +363,7 @@ export default function NovelManager() {
   return (
     <div className="min-h-screen bg-[#111827] text-[#FDFBF5]">
       <NavBar />
-      <div className="max-w-[1400px] mx-auto px-8 py-8">
+      <div className="max-w-[1400px] mx-auto px-4 md:px-8 py-8">
         <div className="flex items-center justify-between mb-8">
           <div>
             <h1 className="text-3xl font-serif font-bold">我的小说文库</h1>
@@ -411,7 +411,7 @@ export default function NovelManager() {
         {/* Add novel form */}
         {showForm && (
           <div className="mb-8 p-6 rounded-xl bg-white/5 border border-white/10 space-y-4">
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block font-mono text-xs text-white/70 mb-2">标题</label>
                 <input
@@ -1005,7 +1005,7 @@ export default function NovelManager() {
 
       {/* 底部批量操作栏 */}
       {isBatchMode && (
-        <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#1F2937]/95 backdrop-blur border-t border-white/10 px-8 py-3">
+        <div className="fixed bottom-0 left-0 right-0 z-40 bg-[#1F2937]/95 backdrop-blur border-t border-white/10 px-4 md:px-8 py-3">
           <div className="max-w-[1400px] mx-auto flex items-center justify-between">
             <div className="flex items-center gap-3">
               <button

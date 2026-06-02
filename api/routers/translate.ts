@@ -172,19 +172,21 @@ async function buildDynamicLoreSection(
   return parts.join("\n")
 }
 
-// 翻译用 chunk 分割：1500 字符/块，400 字符重叠，优先段落边界
+// 翻译用 chunk 分割：1500 字符/块，优先段落边界，无重叠
+// 注意：上下文通过 buildContextBridge 注入 prompt，segment 内容本身不重叠，
+// 避免同一文本被翻译两次导致重复段落。
 function splitTranslationSegments(text: string): string[] {
   const maxLen = 1500
-  const overlap = 400
 
   const paragraphs = text.split("\n").filter(p => p.trim().length > 0)
   const segments: string[] = []
   let current = ""
 
   for (const para of paragraphs) {
+    // 单段超长：直接作为独立 segment，不做中段切割（由 LLM 自行处理）
     if (current.length + para.length > maxLen && current.length > 0) {
       segments.push(current)
-      current = current.slice(-overlap) + "\n" + para
+      current = para
     } else {
       current += (current ? "\n" : "") + para
     }
