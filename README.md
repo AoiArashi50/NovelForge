@@ -30,10 +30,14 @@ AI 驱动的长篇小说翻译与二创平台。支持上传原文、AI 翻译�
 - DeepSeek API Key（[免费获取](https://platform.deepseek.com/api_keys)）
 - Embedding API Key（推荐 [阿里云百炼](https://dashscope.console.aliyun.com/apiKey)，新用户有免费额度）
 
-### 步骤
+### 步骤（二选一）
+
+#### 方式 A：预构建镜像（推荐，30 秒启动）
+
+无需本地编译，直接从 GitHub Container Registry 拉取已构建好的镜像。
 
 ```bash
-# 1. 克隆仓库
+# 1. 克隆仓库（只需要 compose 文件和 .env）
 git clone https://github.com/AoiArashi50/NovelForge.git
 cd NovelForge
 
@@ -41,8 +45,21 @@ cd NovelForge
 cp .env.example .env
 # 编辑 .env，填写你的 API Key
 
-# 3. 一键启动（Windows 双击 start.bat，Linux/macOS 运行 ./start.sh）
-docker compose -f docker-compose.simple.yml up -d
+# 3. 拉取镜像并启动
+docker compose -f docker-compose.image.yml pull
+docker compose -f docker-compose.image.yml up -d
+
+# 4. 打开浏览器访问
+open http://localhost:3000
+```
+
+#### 方式 B：本地构建（如需修改源码）
+
+```bash
+# 1-2 同上
+
+# 3. 本地构建并启动（需 3-5 分钟）
+docker compose -f docker-compose.simple.yml up -d --build
 
 # 4. 打开浏览器访问
 open http://localhost:3000
