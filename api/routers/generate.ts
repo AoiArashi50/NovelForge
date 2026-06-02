@@ -2,9 +2,9 @@ import { z } from "zod"
 import { createRouter, publicQuery } from "../middleware"
 import { getDb } from "../queries/connection"
 import { characterCards, worldBibles, seriesCanon, fanFictionWorks, plotTropes, novels, chapters, ragFeedback } from "@db/schema"
-import { eq, asc, sql } from "drizzle-orm"
-import { streamChat, getEmbedding, chatCompletion } from "../services/deepseek"
-import { searchSimilar } from "../services/embedder"
+import { eq, asc, desc, sql } from "drizzle-orm"
+import { streamChat, chatCompletion } from "../services/deepseek"
+import { searchSimilar, getEmbeddingWithCache } from "../services/embedder"
 
 const WRITING_MODES = [
   "canon_continuation",
@@ -12,6 +12,27 @@ const WRITING_MODES = [
   "original_in_universe",
   "alternate_universe",
 ] as const
+
+// 生成任务进度（内存存储，单用户场景无需 Redis）
+// key: taskId, value: { step, message, completed, result }
+interface GenerationProgress {
+  step: number
+  message: string
+  completed: boolean
+  result?: { workId: number; title: string }
+  error?: string
+}
+const generationProgress = new Map<string, GenerationProgress>()
+
+function setProgress(taskId: string, step: number, message: string) {
+  generationProgress.set(taskId, { step, message, completed: false })
+}
+function completeProgress(taskId: string, result: { workId: number; title: string }) {
+  generationProgress.set(taskId, { step: 4, message: "创作完成", completed: true, result })
+}
+function failProgress(taskId: string, error: string) {
+  generationProgress.set(taskId, { step: -1, message: error, completed: true, error })
+}
 
 // 生成参数 Schema
 const generationParamsSchema = z.object({
@@ -85,6 +106,17 @@ const MODE_CONFIG: Record<
     canonTreatment:
       "【正史约束】正史仅作为角色背景参考。你可以自由改写历史事件，创造全新的时间线。不必遵循原作历史。",
   },
+}
+
+// 各创作模式的 RAG 检索策略（动态权重调优）
+const MODE_RAG_CONFIG: Record<
+  (typeof WRITING_MODES)[number],
+  { novelStyleLimit: number; materialLimit: number; keywordLimit: number }
+> = {
+  canon_continuation:   { novelStyleLimit: 3, materialLimit: 3, keywordLimit: 2 },
+  character_spinoff:    { novelStyleLimit: 2, materialLimit: 4, keywordLimit: 2 },
+  original_in_universe: { novelStyleLimit: 1, materialLimit: 5, keywordLimit: 2 },
+  alternate_universe:   { novelStyleLimit: 2, materialLimit: 4, keywordLimit: 2 },
 }
 
 function buildStyleGuide(fidelity: number): string {
@@ -292,7 +324,7 @@ async function buildSystemPrompt(
   // 预计算 brief 的 embedding，供向量检索和翻译记忆复用
   let briefEmbedding: number[] | undefined
   try {
-    briefEmbedding = await getEmbedding(brief)
+    briefEmbedding = await getEmbeddingWithCache(brief)
   } catch {
     // embedding 失败不影响主流程，后续检索会回退到内部计算
   }
@@ -312,17 +344,20 @@ async function buildSystemPrompt(
       : ""
   }
 
+  // 各创作模式的 RAG limit
+  const ragConfig = MODE_RAG_CONFIG[mode]
+
   // 4a. 从关联小说做向量检索
   if (parentNovelId) {
-    const novelResults = await searchSimilar(brief, { novelId: parentNovelId, limit: params.ragLimit, embedding: briefEmbedding })
+    const novelResults = await searchSimilar(brief, { novelId: parentNovelId, limit: ragConfig.novelStyleLimit, embedding: briefEmbedding })
     if (novelResults.length > 0) {
-      const content = novelResults.map(r => r.content).join("\n---\n")
+      const content = novelResults.map(r => r.enrichedContent || r.content).join("\n---\n")
       ragParts.push(buildRagPrefix(content) + "【原作风格参考】\n" + content)
       for (const r of novelResults) {
         if (r.id) seenChunkIds.add(r.id)
         ragCalls.push({
           type: "novel_style",
-          content: r.content,
+          content: r.enrichedContent || r.content,
           score: r.similarity,
           sourceTitle: r.sourceTitle,
           chapterNumber: r.chapterNumber,
@@ -336,15 +371,15 @@ async function buildSystemPrompt(
 
   // 4b. 从素材池做向量检索
   if (useMaterials !== false) {
-    const materialVecResults = await searchSimilar(brief, { seriesId, limit: params.ragLimit, materialIds: materialIds?.length ? materialIds : undefined, embedding: briefEmbedding })
+    const materialVecResults = await searchSimilar(brief, { seriesId, limit: ragConfig.materialLimit, materialIds: materialIds?.length ? materialIds : undefined, embedding: briefEmbedding })
     if (materialVecResults.length > 0) {
-      const content = materialVecResults.map(r => r.content).join("\n---\n")
+      const content = materialVecResults.map(r => r.enrichedContent || r.content).join("\n---\n")
       ragParts.push(buildRagPrefix(content) + "【投喂素材参考】\n" + content)
       for (const r of materialVecResults) {
         if (r.id) seenChunkIds.add(r.id)
         ragCalls.push({
           type: "material",
-          content: r.content,
+          content: r.enrichedContent || r.content,
           score: r.similarity,
           sourceTitle: r.sourceTitle,
           chapterNumber: r.chapterNumber,
@@ -366,7 +401,7 @@ async function buildSystemPrompt(
       WHERE series_id = ${seriesId}
         AND to_tsvector('simple', content) @@ plainto_tsquery('simple', ${briefQuery})
       ORDER BY score DESC
-      LIMIT ${params.ragLimit}
+      LIMIT ${ragConfig.keywordLimit}
     `)
     const ftRows = Array.isArray(fullText) ? fullText : []
     const newFtRows = ftRows.filter((r: Record<string, unknown>) => !seenChunkIds.has(Number(r.id)))
@@ -648,6 +683,103 @@ async function getHotkeyTropeIds(seriesId: number, limit = 3): Promise<number[]>
     .map(([id]) => id)
 }
 
+/**
+ * 生成后自检 — 检查 OOC、正史矛盾、未授权角色出场
+ * 返回违规列表，为空表示通过
+ */
+async function selfCritique(
+  content: string,
+  seriesId: number,
+  selectedCharacterIds: number[] | undefined
+): Promise<{ passed: boolean; issues: string[] }> {
+  const db = getDb()
+
+  // 查询角色
+  const allChars = await db
+    .select()
+    .from(characterCards)
+    .where(eq(characterCards.seriesId, seriesId))
+
+  const selectedChars = selectedCharacterIds && selectedCharacterIds.length > 0
+    ? allChars.filter(c => selectedCharacterIds.includes(c.id))
+    : allChars
+  const unselectedChars = allChars.filter(c =>
+    !selectedCharacterIds || !selectedCharacterIds.includes(c.id)
+  )
+
+  // 查询正史
+  const canonEvents = await db
+    .select()
+    .from(seriesCanon)
+    .where(eq(seriesCanon.seriesId, seriesId))
+    .orderBy(asc(seriesCanon.eventOrder))
+
+  const immutableEvents = canonEvents.filter(e => e.isImmutable)
+
+  // 构建自检 prompt（精简，控制 token）
+  const parts: string[] = []
+
+  if (selectedChars.length > 0) {
+    parts.push("【授权角色 — 仅允许以下角色出场】")
+    for (const char of selectedChars) {
+      const traits = (char.personalityTraits as string[] || []).join("、")
+      parts.push(`- ${char.name}: ${traits}${char.speechPatterns ? ` | 语言风格: ${char.speechPatterns}` : ""}`)
+    }
+  }
+
+  if (unselectedChars.length > 0) {
+    parts.push("【严禁出场的角色】")
+    for (const char of unselectedChars) {
+      parts.push(`- ${char.name}`)
+    }
+  }
+
+  if (immutableEvents.length > 0) {
+    parts.push("【不可违背的正史事件】")
+    for (const event of immutableEvents) {
+      parts.push(`- ${event.description}`)
+    }
+  }
+
+  parts.push("【待审查内容】")
+  parts.push(content.slice(0, 2500)) // 取前 2500 字进行审查
+  if (content.length > 2500) parts.push("...（内容截断）")
+
+  const critiquePrompt = `请审查以下创作内容，检查是否有违反设定之处。
+
+${parts.join("\n")}
+
+请检查：
+1. 是否有【严禁出场的角色】以任何形式出现（对话、回忆、旁白、背景故事）？
+2. 情节是否与【不可违背的正史事件】矛盾？
+3. 【授权角色】的语言风格是否与其设定一致？
+
+只输出发现的违规，每条一行。没有违规则只输出一个字：通过。`
+
+  try {
+    const response = await chatCompletion({
+      messages: [{ role: "user", content: critiquePrompt }],
+      temperature: 0.2,
+      maxTokens: 600,
+    })
+
+    const trimmed = response.trim()
+    if (trimmed === "通过" || trimmed.length < 5) {
+      return { passed: true, issues: [] }
+    }
+
+    const issues = trimmed
+      .split("\n")
+      .map(line => line.trim())
+      .filter(line => line.length > 0 && !line.startsWith("通过"))
+
+    return { passed: issues.length === 0, issues }
+  } catch {
+    // 自检失败不影响主流程
+    return { passed: true, issues: ["自检服务暂不可用"] }
+  }
+}
+
 // 辅助：流式生成并收集完整内容
 async function generateContent(
   messages: Array<{ role: "system" | "user"; content: string }>,
@@ -675,38 +807,50 @@ export const generateRouter = createRouter({
       materialIds: z.array(z.number()).optional(),
       selectedCharacterIds: z.array(z.number()).optional(),
       selectedTropeIds: z.array(z.number()).optional(),
+      taskId: z.string().optional(),
     }))
     .mutation(async ({ input }) => {
-      const hotkeyTropeIds = await getHotkeyTropeIds(input.seriesId)
-      const { prompt: systemPrompt, ragCalls, warnings } = await buildSystemPrompt(
-        input.seriesId,
-        input.brief,
-        input.parameters,
-        input.parentNovelId,
-        input.userPrompt,
-        input.useMaterials,
-        input.materialIds,
-        input.selectedCharacterIds,
-        input.selectedTropeIds,
-        hotkeyTropeIds
-      )
+      const taskId = input.taskId || crypto.randomUUID()
+      setProgress(taskId, 1, "正在检索参考素材...")
 
-      const messages = [
-        { role: "system" as const, content: systemPrompt },
-        { role: "user" as const, content: input.brief },
-      ]
+      try {
+        const hotkeyTropeIds = await getHotkeyTropeIds(input.seriesId)
+        const { prompt: systemPrompt, ragCalls, warnings } = await buildSystemPrompt(
+          input.seriesId,
+          input.brief,
+          input.parameters,
+          input.parentNovelId,
+          input.userPrompt,
+          input.useMaterials,
+          input.materialIds,
+          input.selectedCharacterIds,
+          input.selectedTropeIds,
+          hotkeyTropeIds
+        )
 
-      const maxTokens = input.parameters.lengthTarget === "short"
-        ? 1500
-        : input.parameters.lengthTarget === "chapter"
-        ? 4000
-        : 2000
+        setProgress(taskId, 2, "正在组装创作指令...")
 
-      const fullContent = await generateContent(
-        messages,
-        input.parameters.temperature,
-        maxTokens
-      )
+        const messages = [
+          { role: "system" as const, content: systemPrompt },
+          { role: "user" as const, content: input.brief },
+        ]
+
+        const maxTokens = input.parameters.lengthTarget === "short"
+          ? 1500
+          : input.parameters.lengthTarget === "chapter"
+          ? 4000
+          : 2000
+
+        setProgress(taskId, 3, "AI 正在创作中...")
+        const fullContent = await generateContent(
+          messages,
+          input.parameters.temperature,
+          maxTokens
+        )
+
+        setProgress(taskId, 4, "正在保存作品...")
+
+        // 若用户未提供标题，自动根据 brief 与生成内容提炼标题
 
       // 若用户未提供标题，自动根据 brief 与生成内容提炼标题
       let autoTitle: string | undefined
@@ -750,11 +894,25 @@ export const generateRouter = createRouter({
 
       // 保存到数据库（将 selectedCharacterIds 存入 parameters）
       const db = getDb()
+
+      // 生成后自检（不阻塞保存，失败时记录原因）
+      let selfCritiqueResult: { passed: boolean; issues: string[] } = { passed: true, issues: [] }
+      try {
+        selfCritiqueResult = await selfCritique(
+          fullContent,
+          input.seriesId,
+          input.selectedCharacterIds
+        )
+      } catch {
+        /* 自检失败不影响主流程 */
+      }
+
       const storedParams = {
         ...input.parameters,
         selectedCharacterIds: input.selectedCharacterIds,
         selectedTropeIds: input.selectedTropeIds,
         ragCalls,
+        selfCritique: selfCritiqueResult,
       }
       const [work] = await db
         .insert(fanFictionWorks)
@@ -786,7 +944,21 @@ export const generateRouter = createRouter({
         // 记录失败不影响主流程
       }
 
-      return { content: fullContent, workId: work.id, ragCalls, warnings, autoTitle }
+      completeProgress(taskId, { workId: work.id, title: finalTitle })
+
+      return { content: fullContent, workId: work.id, ragCalls, warnings, autoTitle, taskId }
+    } catch (err) {
+      failProgress(taskId, String(err))
+      throw err
+    }
+    }),
+
+  progress: publicQuery
+    .input(z.object({ taskId: z.string() }))
+    .query(({ input }) => {
+      const p = generationProgress.get(input.taskId)
+      if (!p) return { step: 0, message: "等待开始...", completed: false } as const
+      return { step: p.step, message: p.message, completed: p.completed, result: p.result, error: p.error } as const
     }),
 
   continue: publicQuery
@@ -810,9 +982,19 @@ export const generateRouter = createRouter({
 
       const storedParams = (work.parameters || {}) as Record<string, unknown>
       const hotkeyTropeIds = await getHotkeyTropeIds(work.seriesId!)
+
+      // 多轮上下文感知：用已生成内容的最后 500 字叠加 brief 做检索 query
+      const generatedContent = work.generatedContent || ""
+      const contextSuffix = generatedContent.length > 500
+        ? `\n\n前文摘要：${generatedContent.slice(-500)}`
+        : generatedContent.length > 0
+        ? `\n\n前文摘要：${generatedContent}`
+        : ""
+      const contextQuery = (input.brief || "请继续以下内容") + contextSuffix
+
       const { prompt: systemPrompt, ragCalls, warnings } = await buildSystemPrompt(
         work.seriesId!,
-        input.brief || "请继续以下内容",
+        contextQuery,
         (storedParams as Partial<GenParams>) || {},
         work.parentNovelId || undefined,
         input.userPrompt,
@@ -931,6 +1113,24 @@ export const generateRouter = createRouter({
     .input(z.object({ id: z.number() }))
     .mutation(async ({ input }) => {
       const db = getDb()
+
+      // 记录删除前的快照
+      const [work] = await db
+        .select()
+        .from(fanFictionWorks)
+        .where(eq(fanFictionWorks.id, input.id))
+
+      if (work) {
+        const { logAudit } = await import("../routers/audit")
+        await logAudit({
+          action: "fanfiction_delete",
+          entityType: "fanfiction",
+          entityId: input.id,
+          snapshot: work as unknown as Record<string, unknown>,
+          description: `删除二创作品《${work.title}》`,
+        })
+      }
+
       await db
         .delete(fanFictionWorks)
         .where(eq(fanFictionWorks.id, input.id))
@@ -951,6 +1151,48 @@ export const generateRouter = createRouter({
           .orderBy(fanFictionWorks.createdAt)
       }
       return db.select().from(fanFictionWorks).orderBy(fanFictionWorks.createdAt)
+    }),
+
+  search: publicQuery
+    .input(z.object({
+      query: z.string().optional(),
+      seriesId: z.number().optional(),
+      days: z.number().optional(),
+      sortBy: z.enum(["createdAt", "updatedAt", "title"]).default("createdAt"),
+      limit: z.number().min(1).max(50).default(20),
+    }))
+    .query(async ({ input }) => {
+      const db = getDb()
+
+      let whereClause: ReturnType<typeof sql> | undefined = undefined
+
+      if (input.query?.trim()) {
+        const q = `%${input.query.trim()}%`
+        whereClause = sql`${fanFictionWorks.title} LIKE ${q} OR ${fanFictionWorks.brief} LIKE ${q}`
+      }
+      if (input.seriesId) {
+        const c = sql`${fanFictionWorks.seriesId} = ${input.seriesId}`
+        whereClause = whereClause ? sql`${whereClause} AND ${c}` : c
+      }
+      if (input.days) {
+        const cutoff = new Date(Date.now() - input.days * 24 * 60 * 60 * 1000)
+        const c = sql`${fanFictionWorks.createdAt} >= ${cutoff}`
+        whereClause = whereClause ? sql`${whereClause} AND ${c}` : c
+      }
+
+      const orderBy =
+        input.sortBy === "title"
+          ? asc(fanFictionWorks.title)
+          : input.sortBy === "updatedAt"
+          ? desc(fanFictionWorks.updatedAt)
+          : desc(fanFictionWorks.createdAt)
+
+      return db
+        .select()
+        .from(fanFictionWorks)
+        .where(whereClause)
+        .orderBy(orderBy)
+        .limit(input.limit)
     }),
 
   // 将二创作品保存为小说

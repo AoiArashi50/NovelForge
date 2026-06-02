@@ -4,10 +4,11 @@
  */
 import { splitIntoSemanticChunks } from "../lib/chunk-utils"
 
-import { getEmbedding } from "./deepseek"
+import { getEmbedding, getEmbeddingsBatch } from "./deepseek"
 import { getDb } from "../queries/connection"
-import { vectorChunks } from "@db/schema"
-import { sql } from "drizzle-orm"
+import { vectorChunks, embeddingCache } from "@db/schema"
+import { sql, eq } from "drizzle-orm"
+import crypto from "node:crypto"
 
 // ========== 索引 ==========
 
@@ -35,40 +36,75 @@ export async function indexNovel(
   })
 
   const db = getDb()
-  let chunkCount = 0
 
-  for (const chunk of chunks) {
-    if (chunk.content.trim().length < 50) continue
+  // 过滤有效 chunks
+  const validChunks = chunks.filter(c => c.content.trim().length >= 50)
+  if (validChunks.length === 0) return { chunkCount: 0 }
 
-    try {
-      const embedding = await getEmbedding(chunk.content)
-
-      await db.insert(vectorChunks).values({
-        content: chunk.content,
-        embedding: embedding as unknown as number[],
-        sourceType,
-        novelId,
-        seriesId: seriesId || null,
-        metadata: {
-          indexedAt: new Date().toISOString(),
-          sourceId: chunk.sourceId,
-          sourceTitle: chunk.sourceTitle,
-          chapterNumber: chunk.chapterNumber,
-          chunkIndex: chunk.chunkIndex,
-          totalChunks: chunk.totalChunks,
-          contextBefore: chunk.contextBefore,
-          contextAfter: chunk.contextAfter,
-        },
-      })
-
-      chunkCount++
-    } catch (error) {
-      console.error("Embedding failed for chunk:", error)
-      // 继续处理下一个 chunk
+  // 批量计算 embedding（一次 API 调用处理 20 条，大幅提速）
+  let embeddings: number[][] = []
+  try {
+    embeddings = await getEmbeddingsBatch(validChunks.map(c => c.content.trim()))
+  } catch (error) {
+    console.error("Batch embedding failed:", error)
+    // 批量失败时回退到逐条处理
+    embeddings = []
+    for (const chunk of validChunks) {
+      try {
+        const e = await getEmbedding(chunk.content.trim())
+        embeddings.push(e)
+      } catch {
+        embeddings.push([])
+      }
     }
   }
 
-  return { chunkCount }
+  // 构建批量插入数据
+  const insertValues = validChunks.map((chunk, i) => {
+    const embedding = embeddings[i]
+    if (!embedding || embedding.length === 0) return null
+
+    // 计算素材质量分
+    let qualityScore = 1.0
+    const len = chunk.content.length
+    if (len < 100) qualityScore -= 0.2
+    if (len > 800) qualityScore += 0.1
+    if (sourceType === "style_sample") qualityScore += 0.5
+    qualityScore = Math.max(0.1, Math.min(2.0, qualityScore))
+
+    return {
+      content: chunk.content,
+      embedding: embedding as unknown as number[],
+      sourceType,
+      novelId,
+      seriesId: seriesId || null,
+      metadata: {
+        indexedAt: new Date().toISOString(),
+        sourceId: chunk.sourceId,
+        sourceTitle: chunk.sourceTitle,
+        chapterNumber: chunk.chapterNumber,
+        chunkIndex: chunk.chunkIndex,
+        totalChunks: chunk.totalChunks,
+        contextBefore: chunk.contextBefore,
+        contextAfter: chunk.contextAfter,
+        qualityScore,
+      },
+    }
+  }).filter(Boolean) as Array<{
+    content: string
+    embedding: number[]
+    sourceType: string
+    novelId: number
+    seriesId: number | null
+    metadata: Record<string, unknown>
+  }>
+
+  if (insertValues.length > 0) {
+    // Drizzle 支持一次插入多条
+    await db.insert(vectorChunks).values(insertValues)
+  }
+
+  return { chunkCount: insertValues.length }
 }
 
 // ========== 检索 ==========
@@ -76,6 +112,8 @@ export async function indexNovel(
 export interface SearchResult {
   id?: number
   content: string
+  /** 拼接了 contextBefore + content + contextAfter 的富化内容，供 prompt 注入使用 */
+  enrichedContent?: string
   similarity: number
   sourceType: string
   sourceTitle?: string
@@ -113,19 +151,167 @@ export async function searchSimilar(
 
   const rows = Array.isArray(results) ? results : []
 
-  return rows.map((row: Record<string, unknown>) => {
+  const mapped = rows.map((row: Record<string, unknown>) => {
     const metadata = (row.metadata as Record<string, unknown>) || {}
+    const content = String(row.content)
+    const contextBefore = metadata.contextBefore ? String(metadata.contextBefore) : undefined
+    const contextAfter = metadata.contextAfter ? String(metadata.contextAfter) : undefined
+
+    // 拼接上下文形成富化内容（供 prompt 注入使用）
+    const enrichedParts: string[] = []
+    if (contextBefore) enrichedParts.push(`【上文】${contextBefore}`)
+    enrichedParts.push(content)
+    if (contextAfter) enrichedParts.push(`【下文】${contextAfter}`)
+
     return {
       id: row.id ? Number(row.id) : undefined,
-      content: String(row.content),
+      content,
+      enrichedContent: enrichedParts.join("\n"),
       similarity: Number(row.similarity),
       sourceType: String(row.source_type),
       sourceTitle: metadata.sourceTitle ? String(metadata.sourceTitle) : undefined,
       chapterNumber: metadata.chapterNumber ? Number(metadata.chapterNumber) : undefined,
       chunkIndex: metadata.chunkIndex ? Number(metadata.chunkIndex) : undefined,
       totalChunks: metadata.totalChunks ? Number(metadata.totalChunks) : undefined,
-      contextBefore: metadata.contextBefore ? String(metadata.contextBefore) : undefined,
-      contextAfter: metadata.contextAfter ? String(metadata.contextAfter) : undefined,
+      contextBefore,
+      contextAfter,
+      qualityScore: Number(metadata.qualityScore || 1.0),
     }
   })
+
+  // 按素材质量分加权重排序（高质量素材提升排名）
+  mapped.sort((a, b) => {
+    const scoreA = (a.similarity || 0) * (a.qualityScore || 1.0)
+    const scoreB = (b.similarity || 0) * (b.qualityScore || 1.0)
+    return scoreB - scoreA
+  })
+
+  // 相邻 Chunk 召回（Parent Document Retrieval）：对 top 结果补充相邻片段上下文
+  if (mapped.length > 0) {
+    const enriched = await enrichWithAdjacentChunks(mapped)
+    return enriched
+  }
+
+  return mapped
+}
+
+/**
+ * 为检索结果补充相邻 chunks 的上下文
+ * 同一 sourceId + chapterNumber 下，chunkIndex ± 1 的片段
+ */
+async function enrichWithAdjacentChunks(
+  results: SearchResult[]
+): Promise<SearchResult[]> {
+  const db = getDb()
+
+  // 由于 metadata 是 JSONB，我们对每个有完整 metadata 的结果单独查询相邻 chunks
+  const enrichedResults: SearchResult[] = []
+
+  for (const r of results) {
+    if (!r.chunkIndex || r.totalChunks === undefined || r.totalChunks <= 1) {
+      enrichedResults.push(r)
+      continue
+    }
+
+    const adjacentIndices: number[] = []
+    if (r.chunkIndex > 0) adjacentIndices.push(r.chunkIndex - 1)
+    if (r.chunkIndex < r.totalChunks - 1) adjacentIndices.push(r.chunkIndex + 1)
+
+    if (adjacentIndices.length === 0) {
+      enrichedResults.push(r)
+      continue
+    }
+
+    try {
+      // 通过 metadata 中的 sourceTitle + chapterNumber 匹配相邻 chunks
+      const adj = await db.execute(sql`
+        SELECT content, metadata
+        FROM vector_chunks
+        WHERE source_type = ${r.sourceType}
+          AND (
+            (metadata->>'sourceTitle')::text = ${r.sourceTitle || ""}
+            OR (metadata->>'sourceTitle') IS NULL
+          )
+          AND (
+            ${r.chapterNumber}::int IS NULL
+            OR (metadata->>'chapterNumber')::int = ${r.chapterNumber ?? null}::int
+          )
+          AND (metadata->>'chunkIndex')::int = ANY(${JSON.stringify(adjacentIndices)})
+        LIMIT 2
+      `)
+      const adjRows = Array.isArray(adj) ? adj : []
+
+      if (adjRows.length > 0) {
+        const adjContents: string[] = []
+        for (const row of adjRows) {
+          const adjMeta = (row.metadata as Record<string, unknown>) || {}
+          const adjContent = String(row.content)
+          const adjBefore = adjMeta.contextBefore ? String(adjMeta.contextBefore) : undefined
+          const adjAfter = adjMeta.contextAfter ? String(adjMeta.contextAfter) : undefined
+          const parts: string[] = []
+          if (adjBefore) parts.push(`【上文】${adjBefore}`)
+          parts.push(adjContent)
+          if (adjAfter) parts.push(`【下文】${adjAfter}`)
+          adjContents.push(parts.join("\n"))
+        }
+
+        // 将相邻 chunks 拼接到 enrichedContent 前面/后面
+        const enrichedParts: string[] = []
+        // 按 chunkIndex 排序，相邻 chunk 在前
+        enrichedParts.push(...adjContents)
+        enrichedParts.push(r.enrichedContent || r.content)
+
+        enrichedResults.push({
+          ...r,
+          enrichedContent: enrichedParts.join("\n\n【相邻片段】\n\n"),
+        })
+      } else {
+        enrichedResults.push(r)
+      }
+    } catch {
+      enrichedResults.push(r)
+    }
+  }
+
+  return enrichedResults
+}
+
+// ========== Embedding 缓存层 ==========
+
+function sha256(text: string): string {
+  return crypto.createHash("sha256").update(text).digest("hex")
+}
+
+/**
+ * 带缓存的 Embedding 获取
+ * 相同文本前 100 字的 SHA-256 hash 命中缓存时，直接返回缓存的 embedding
+ * 未命中时调用 API，异步写入缓存
+ */
+export async function getEmbeddingWithCache(text: string): Promise<number[]> {
+  const db = getDb()
+  const preview = text.slice(0, 100)
+  const hash = sha256(preview)
+
+  // 1. 查缓存
+  const cached = await db
+    .select()
+    .from(embeddingCache)
+    .where(eq(embeddingCache.textHash, hash))
+    .limit(1)
+
+  if (cached.length > 0) {
+    return cached[0].embedding as unknown as number[]
+  }
+
+  // 2. 未命中：调用 API
+  const embedding = await getEmbedding(text)
+
+  // 3. 异步写入缓存（不阻塞返回）
+  db.insert(embeddingCache).values({
+    textHash: hash,
+    textPreview: text.slice(0, 200),
+    embedding: embedding as unknown as Record<string, unknown>,
+  }).catch(() => { /* 缓存写入失败不影响主流程 */ })
+
+  return embedding
 }
