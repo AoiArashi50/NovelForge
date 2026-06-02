@@ -113,16 +113,26 @@ DB_PASSWORD=your_secure_password
 ## 项目结构
 
 ```
-├── api/              # Hono + tRPC 后端
-│   ├── routers/      # tRPC 路由（novel, translate, lore, rag...）
-│   └── services/     # DeepSeek 调用、Embedding、Parser
-├── src/              # React 前端
-│   ├── pages/        # Studio, Reader, LoreLibrary, NovelManager...
-│   └── components/   # 通用组件
-├── db/               # Drizzle 数据库 schema
-├── contracts/        # Zod 共享校验 schema
-├── docker-compose.simple.yml   # 本地一键启动
-└── docker-compose.yml          # 生产部署（含 nginx + SSL）
+├── api/                        # Hono + tRPC 后端
+│   ├── routers/                # tRPC 路由（novel, translate, lore, rag...）
+│   └── services/               # DeepSeek 调用、Embedding、Parser
+├── src/                        # React 前端
+│   ├── pages/                  # Studio, Reader, LoreLibrary, NovelManager...
+│   └── components/             # 通用组件
+├── db/                         # Drizzle 数据库 schema + 迁移
+├── contracts/                  # Zod 共享校验 schema
+├── docs/                       # 项目文档
+│   ├── ROADMAP.md              # 开发路线图
+│   ├── ProjectGoal.md          # 产品目标（最高权威设计文档）
+│   ├── prompt/                 # 设计阶段 prompt 文档
+│   └── GUIDE.md                # 使用指南
+├── scripts/                    # 辅助脚本
+├── .github/workflows/          # GitHub Actions CI/CD
+├── docker-compose.simple.yml   # 本地一键启动（推荐）
+├── docker-compose.yml          # 生产部署（含 nginx + SSL）
+├── Dockerfile
+├── start.sh / start.bat        # 一键启动脚本
+└── README.md
 ```
 
 ---
@@ -159,6 +169,22 @@ A: 检查 `.env` 中的 `DEEPSEEK_API_KEY` 是否有效，以及账户余额是�
 **Q: 如何备份数据？**
 A: 数据库数据保存在 Docker Volume `pgdata` 中。备份命令：
 `docker exec novelforge-db-1 pg_dump -U novelforge novelforge > backup.sql`
+
+---
+
+## 分支策略
+
+| 分支 | 用途 |
+|------|------|
+| `master` | 稳定版本，随时可部署 |
+| `dev` | 日常开发，功能合并后定期合并到 master |
+
+新功能请从 `dev` 切出 feature 分支：
+
+```bash
+git checkout dev
+git checkout -b feat/your-feature
+```
 
 ---
 
