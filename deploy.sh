@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # NovelForge 个人一键部署脚本
 # 用法（服务器上执行）:
-#   curl -fsSL https://raw.githubusercontent.com/AoiArashi50/NovelForge/master/deploy.sh | bash
-#   或先下载再执行: wget ... && bash deploy.sh
+#   交互式: curl -fsSL .../deploy.sh | sudo bash
+#   非交互: sudo bash deploy.sh --deepseek-key=sk-xxx --db-pass=xxx
 
 set -e
 
@@ -12,6 +12,39 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 NC='\033[0m'
+
+# ── 解析命令行参数 ──
+for arg in "$@"; do
+  case $arg in
+    --deepseek-key=*) DEEPSEEK_KEY="${arg#*=}"; shift ;;
+    --embed-key=*)    EMBED_KEY="${arg#*=}"; shift ;;
+    --embed-url=*)    EMBED_URL="${arg#*=}"; shift ;;
+    --embed-model=*)  EMBED_MODEL="${arg#*=}"; shift ;;
+    --db-pass=*)      DB_PASS="${arg#*=}"; shift ;;
+  esac
+done
+
+# 从 /dev/tty 读取（支持 curl | bash 管道执行）
+read_tty() {
+  local prompt="$1"
+  local var_name="$2"
+  local default="${3:-}"
+  local value
+
+  if [ -t 0 ]; then
+    # 直接执行，stdin 可用
+    read -rp "$prompt" value
+  else
+    # 管道执行，从终端读取
+    read -rp "$prompt" value < /dev/tty
+  fi
+
+  if [ -n "$default" ] && [ -z "$value" ]; then
+    value="$default"
+  fi
+
+  eval "$var_name='$value'"
+}
 
 echo "╔══════════════════════════════════════════════════╗"
 echo "║         NovelForge 个人一键部署脚本              ║"
@@ -39,7 +72,6 @@ else
   echo -e "${GREEN}Docker 已安装${NC}"
 fi
 
-# 安装 docker compose 插件（新版）
 if ! docker compose version &> /dev/null; then
   echo -e "${YELLOW}安装 Docker Compose 插件 ...${NC}"
   apt-get update && apt-get install -y docker-compose-plugin
@@ -60,13 +92,14 @@ fi
 echo -e "${GREEN}代码已就绪${NC}"
 
 # ──────────────────────────────────────────────────
-# 4. 交互式配置 .env
+# 4. 配置 .env
 # ──────────────────────────────────────────────────
 echo "[3/5] 配置环境变量 ..."
-if [ -f ".env" ]; then
-  read -rp ".env 已存在，是否重新配置? [y/N]: " RECONF
+if [ -f ".env" ] && [ -z "$DEEPSEEK_KEY" ]; then
+  read_tty ".env 已存在，是否重新配置? [y/N]: " RECONF
   if [[ ! "$RECONF" =~ ^[Yy]$ ]]; then
     echo "跳过配置，使用现有 .env"
+    CONFIGURE=0
   else
     CONFIGURE=1
   fi
@@ -82,28 +115,37 @@ if [ "$CONFIGURE" = "1" ]; then
   echo ""
 
   # DeepSeek API Key
-  while true; do
-    read -rp "DeepSeek API Key (以 sk- 开头): " DEEPSEEK_KEY
-    if [[ "$DEEPSEEK_KEY" =~ ^sk-.+ ]]; then
-      break
-    fi
-    echo -e "${RED}格式不正确，请以 sk- 开头${NC}"
-  done
+  if [ -z "$DEEPSEEK_KEY" ]; then
+    while true; do
+      read_tty "DeepSeek API Key (以 sk- 开头): " DEEPSEEK_KEY
+      if [[ "$DEEPSEEK_KEY" =~ ^sk-.+ ]]; then
+        break
+      fi
+      echo -e "${RED}格式不正确，请以 sk- 开头${NC}"
+    done
+  fi
 
   # Embedding API Key
-  read -rp "Embedding API Key [默认使用 DeepSeek Key]: " EMBED_KEY
-  EMBED_KEY="${EMBED_KEY:-$DEEPSEEK_KEY}"
+  if [ -z "$EMBED_KEY" ]; then
+    read_tty "Embedding API Key [默认使用 DeepSeek Key]: " EMBED_KEY
+    EMBED_KEY="${EMBED_KEY:-$DEEPSEEK_KEY}"
+  fi
 
   # Embedding 配置
-  read -rp "Embedding 服务地址 [默认 https://dashscope.aliyuncs.com/compatible-mode/v1]: " EMBED_URL
-  EMBED_URL="${EMBED_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+  if [ -z "$EMBED_URL" ]; then
+    read_tty "Embedding 服务地址 [默认 https://dashscope.aliyuncs.com/compatible-mode/v1]: " EMBED_URL
+    EMBED_URL="${EMBED_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}"
+  fi
 
-  read -rp "Embedding 模型 [默认 text-embedding-v4]: " EMBED_MODEL
-  EMBED_MODEL="${EMBED_MODEL:-text-embedding-v4}"
+  if [ -z "$EMBED_MODEL" ]; then
+    read_tty "Embedding 模型 [默认 text-embedding-v4]: " EMBED_MODEL
+    EMBED_MODEL="${EMBED_MODEL:-text-embedding-v4}"
+  fi
 
   # 数据库密码
-  read -rsp "数据库密码 (任意自定义): " DB_PASS
-  echo ""
+  if [ -z "$DB_PASS" ]; then
+    read_tty "数据库密码 (任意自定义): " DB_PASS
+  fi
 
   # 写入 .env
   cat > .env <<EOF
