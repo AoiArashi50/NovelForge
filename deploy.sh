@@ -77,6 +77,38 @@ if ! docker compose version &> /dev/null; then
   apt-get update && apt-get install -y docker-compose-plugin
 fi
 
+# 检测 Docker Hub 连通性（国内服务器常见超时问题）
+echo -n "[1.5/5] 检测 Docker Hub 连通性 ... "
+if ! timeout 10 docker pull hello-world &> /dev/null; then
+  echo -e "${YELLOW}超时${NC}"
+  echo ""
+  echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo -e "${RED}⚠️  你的服务器无法访问 Docker Hub 官方源${NC}"
+  echo -e "${RED}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+  echo ""
+  echo "国内服务器需要配置 Docker 镜像加速器。执行以下命令："
+  echo ""
+  echo "  sudo tee /etc/docker/daemon.json <<-'EOF'"
+  echo '  {'
+  echo '    "registry-mirrors": ['
+  echo '      "https://docker.m.daocloud.io",'
+  echo '      "https://docker.1panel.live",'
+  echo '      "https://hub.rat.dev"'
+  echo '    ]'
+  echo '  }'
+  echo "  EOF"
+  echo "  sudo systemctl daemon-reload && sudo systemctl restart docker"
+  echo ""
+  read_tty "配置完成后按 Enter 继续，或 Ctrl+C 退出: " DUMMY
+  if ! timeout 10 docker pull hello-world &> /dev/null; then
+    echo -e "${RED}❌ 仍无法访问 Docker Hub，请检查网络或手动配置加速器后再试${NC}"
+    exit 1
+  fi
+  echo -e "${GREEN}加速器配置成功${NC}"
+else
+  echo -e "${GREEN}正常${NC}"
+fi
+
 # ──────────────────────────────────────────────────
 # 3. 克隆/更新项目
 # ──────────────────────────────────────────────────
